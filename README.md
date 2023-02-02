@@ -1,10 +1,11 @@
-Object Spy (MS-Spy.exe) 
+**Object Spy (MS-Spy.exe)**
+
 Drag the crosshair to another window, and it will be framed, and the main properties are displayed in the main window. Once released, you get property values.
 
-Click Me 
+**Click Me** 
 it will generate pywinauto compatible code
 
-Prerequsite:-
+**Prerequsite:-**
 - Python should be installed
 - pip install pywinauto
 

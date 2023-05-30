@@ -1,4 +1,4 @@
-**Object Spy (MS-Spy.exe)**
+**Object Spy (MS-Spy.exe / Zed Spy)**
 
 Drag the crosshair to another window, and it will be framed, and the main properties are displayed in the main window. Once released, you get property values.
 

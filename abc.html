@@ -1,42 +1,39 @@
 import os
 import re
 
-def regularexpression(filename, folder_path):
-    # Extract the prefix (e.g., FS_ALW_DSM_AS or FS_ALW_DSM_QA) and the postfix (e.g., domestic)
-    base_pattern = re.match(r"([A-Za-z_]+)_\d{8}_\d{4}_(\w+)\.csv", filename)
-    
-    if not base_pattern:
-        print("Filename doesn't match the expected structure.")
-        return None  # If the filename doesn't match the expected structure, return None
-    
-    # Dynamically create the pattern based on the filename's prefix and postfix
-    prefix = base_pattern.group(1)  # FS_ALW_DSM_AS or FS_ALW_DSM_QA
-    postfix = base_pattern.group(2)  # e.g., domestic
-    
-    # Define the dynamic pattern where postfix is flexible, with correct escaping
-    pattern = f"{prefix}_\\d{{8}}_\\d{{4}}_{postfix}\\.csv"  # escape { and } with double braces
+def regularexpression(filenames, folder_path):
+    # Create an empty list to store matching filenames
+    matching_files = []
 
-    # Compile the regular expression pattern with case insensitivity
-    regex = re.compile(pattern, re.IGNORECASE)
+    # Iterate through the list of filenames
+    for filename in filenames:
+        # Extract the prefix (e.g., FS_ALW_DSM_AS or FS_ALW_DSM_QA) and the postfix (e.g., domestic)
+        base_pattern = re.match(r"([A-Za-z_]+)_\d{8}_\d{4}_(\w+)\.csv", filename)
+        
+        if not base_pattern:
+            print(f"Filename {filename} doesn't match the expected structure.")
+            continue  # Skip this file if it doesn't match the expected structure
+        
+        # Dynamically create the pattern based on the filename's prefix and postfix
+        prefix = base_pattern.group(1)  # FS_ALW_DSM_AS or FS_ALW_DSM_QA
+        postfix = base_pattern.group(2)  # e.g., domestic
+        
+        # Define the dynamic pattern where postfix is flexible, with correct escaping
+        pattern = f"{prefix}_\\d{{8}}_\\d{{4}}_{postfix}\\.csv"
 
-    # List all files in the folder
-    available_files = os.listdir(folder_path)
-    print(f"Available files in folder: {available_files}")  # Debugging: print the list of files
+        # Compile the regular expression pattern with case insensitivity
+        regex = re.compile(pattern, re.IGNORECASE)
 
-    # Find matching files based on the regular expression
-    matching_files = [f for f in available_files if regex.match(f)]
-    print(f"Matching files: {matching_files}")  # Debugging: print the matching files
-    
-    # If we find matching files, return the first file name
-    if matching_files:
-        return matching_files[0]
-    
-    # Return None if no matching files are found
-    return None
+        # Check if the current filename matches the regex pattern
+        if regex.match(filename):
+            matching_files.append(filename)  # Add to the list if it matches
+
+    # Return the list of matching files
+    return matching_files
 
 # Example usage:
-filename = "FS_ALW_DSM_AS_20250414_1000_domestic.csv"
-folder_path = "C:\\Users\\Admin\\Desktop\\New Int\\dest"
+filenames = ["FS_ALW_DSM_AS_20250414_1000_domestic.csv", "FS_ALW_DSM_AQ_20250314_1000_domestic.csv"]
+folder_path = "C:\\Users\\Admin\\Desktop\\New Int\\dest"  # folder path can be ignored here
 
-x = regularexpression(filename, folder_path)
-print(f"Matched file: {x}")
+matching_files = regularexpression(filenames, folder_path)
+print(f"Matched files: {matching_files}")

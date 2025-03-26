@@ -1,0 +1,18 @@
+filename = "FS_ALW_DSM_AS_20250313_1000_domestic.csv"
+pattern = r"FS_ALW_DSM_AS_\d{8}_\d{4}_domestic\.csv"
+regex = re.compile(pattern)
+available_files = os.listdir(folder_path)
+matching_files = [f for f in available_files if regex.match(f)]
+if matching_files:
+    # Construct the full path for the first matching file
+    matching_file_path = os.path.join(folder_path, matching_files[0])
+
+    # Read the file using pandas (assuming it's a CSV file)
+    try:
+        df = pd.read_csv(matching_file_path)
+        print("File content:")
+        print(df.head())  # Display the first few rows of the file
+    except FileNotFoundError:
+        print(f"File not found: {matching_file_path}")
+else:
+    print(f"No matching files found for the pattern {pattern}")

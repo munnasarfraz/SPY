@@ -1,46 +1,67 @@
 import os
-import re
+import concurrent.futures
+from datetime import datetime
+from tqdm import tqdm
 
-def regularexpression(filenames, folder_path):
-    # Create an empty list to store matching filenames
-    matching_files = []
+# Assuming compare_csv and get_files_from_folder are already defined
 
-    # List all files in the folder
-    available_files = os.listdir(folder_path)
-    
-    # Iterate through the list of filenames
-    for filename in filenames:
-        # First, check if the filename exists in the folder (exact match)
-        if filename in available_files:
-            matching_files.append(filename)  # Add to list if file exists in the folder
-        else:
-            # If file doesn't exist, check if it matches the regular expression pattern
-            base_pattern = re.match(r"([A-Za-z_]+)_\d{8}_\d{4}_(\w+)\.csv", filename)
-            
-            if not base_pattern:
-                print(f"Filename {filename} doesn't match the expected structure.")
-                continue  # Skip this file if it doesn't match the expected structure
+def compare_multiple_files(source_folder, destination_folder, primary_key_columns, output_file, use_multithreading=True):
+    report_start_time = datetime.now()
 
-            # Dynamically create the pattern based on the filename's prefix and postfix
-            prefix = base_pattern.group(1)  # FS_ALW_DSM_AS or FS_ALW_DSM_QA
-            postfix = base_pattern.group(2)  # e.g., domestic
-            
-            # Define the dynamic pattern where postfix is flexible, with correct escaping
-            pattern = f"{prefix}_\\d{{8}}_\\d{{4}}_{postfix}\\.csv"
+    source_files = get_files_from_folder(source_folder)
+    destination_files = get_files_from_folder(destination_folder)
+    files_to_compare = [f for f in source_files if f in destination_files]
 
-            # Compile the regular expression pattern with case insensitivity
-            regex = re.compile(pattern, re.IGNORECASE)
+    file_comparisons = {}
 
-            # If the file doesn't exist, but the filename matches the regex pattern, add it to the list
-            if regex.match(filename):
-                matching_files.append(filename)
+    # Add "No Comparison" files
+    no_comparison_files = [f for f in source_files if f not in destination_files]
 
-    # Return the list of matching files
-    return matching_files
+    for file in no_comparison_files:
+        file_comparisons[file] = (None, None)
 
-# Example usage:
-filenames = ["FS_ALW_DSM_AS_20250414_1000_domestic.csv", "FS_ALW_DSM_AQ_20250314_1000_domestic.csv"]
-folder_path = "C:\\Users\\Admin\\Desktop\\New Int\\source"  # Example folder path
+    if use_multithreading:
+        # Multithreading version
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(compare_csv, os.path.join(source_folder, file), os.path.join(destination_folder, file), primary_key_columns, columns) 
+                       for file in files_to_compare]
 
-matching_files = regularexpression(filenames, folder_path)
-print(f"Matched files: {matching_files}")
+            results = []
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Comparing files", ncols=100):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    print(f"Error comparing files: {e}")
+                    results.append((None, None))
+
+            for file, (diff_df, summary) in zip(files_to_compare, results):
+                file_comparisons[file] = (diff_df, summary)
+    else:
+        # Sequential version for debugging (No multithreading)
+        results = []
+        for file in tqdm(files_to_compare, desc="Comparing files", ncols=100):
+            try:
+                result = compare_csv(os.path.join(source_folder, file), os.path.join(destination_folder, file), primary_key_columns, columns)
+                results.append(result)
+            except Exception as e:
+                print(f"Error comparing {file}: {e}")
+                results.append((None, None))
+
+        for file, (diff_df, summary) in zip(files_to_compare, results):
+            file_comparisons[file] = (diff_df, summary)
+
+    # At this point, file_comparisons will contain the comparison results.
+    # You can write the results to output_file or process them as needed.
+    return file_comparisons
+
+# Example usage with multithreading enabled (True) or disabled (False)
+file_comparisons = compare_multiple_files(
+    source_folder="path/to/source_folder",
+    destination_folder="path/to/destination_folder",
+    primary_key_columns=["id"],
+    output_file="path/to/output_file.csv",
+    use_multithreading=False  # Set this to False to disable multithreading
+)
+
+print(file_comparisons)

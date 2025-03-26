@@ -1,18 +1,42 @@
-filename = "FS_ALW_DSM_AS_20250313_1000_domestic.csv"
-pattern = r"FS_ALW_DSM_AS_\d{8}_\d{4}_domestic\.csv"
-regex = re.compile(pattern)
-available_files = os.listdir(folder_path)
-matching_files = [f for f in available_files if regex.match(f)]
-if matching_files:
-    # Construct the full path for the first matching file
-    matching_file_path = os.path.join(folder_path, matching_files[0])
+import os
+import re
 
-    # Read the file using pandas (assuming it's a CSV file)
-    try:
-        df = pd.read_csv(matching_file_path)
-        print("File content:")
-        print(df.head())  # Display the first few rows of the file
-    except FileNotFoundError:
-        print(f"File not found: {matching_file_path}")
-else:
-    print(f"No matching files found for the pattern {pattern}")
+def regularexpression(filename, folder_path):
+    # Extract the prefix (e.g., FS_ALW_DSM_AS or FS_ALW_DSM_QA) and the postfix (e.g., domestic)
+    base_pattern = re.match(r"([A-Za-z_]+)_\d{8}_\d{4}_(\w+)\.csv", filename)
+    
+    if not base_pattern:
+        print("Filename doesn't match the expected structure.")
+        return None  # If the filename doesn't match the expected structure, return None
+    
+    # Dynamically create the pattern based on the filename's prefix and postfix
+    prefix = base_pattern.group(1)  # FS_ALW_DSM_AS or FS_ALW_DSM_QA
+    postfix = base_pattern.group(2)  # e.g., domestic
+    
+    # Define the dynamic pattern where postfix is flexible, with correct escaping
+    pattern = f"{prefix}_\\d{{8}}_\\d{{4}}_{postfix}\\.csv"  # escape { and } with double braces
+
+    # Compile the regular expression pattern with case insensitivity
+    regex = re.compile(pattern, re.IGNORECASE)
+
+    # List all files in the folder
+    available_files = os.listdir(folder_path)
+    print(f"Available files in folder: {available_files}")  # Debugging: print the list of files
+
+    # Find matching files based on the regular expression
+    matching_files = [f for f in available_files if regex.match(f)]
+    print(f"Matching files: {matching_files}")  # Debugging: print the matching files
+    
+    # If we find matching files, return the first file name
+    if matching_files:
+        return matching_files[0]
+    
+    # Return None if no matching files are found
+    return None
+
+# Example usage:
+filename = "FS_ALW_DSM_AS_20250414_1000_domestic.csv"
+folder_path = "C:\\Users\\Admin\\Desktop\\New Int\\dest"
+
+x = regularexpression(filename, folder_path)
+print(f"Matched file: {x}")

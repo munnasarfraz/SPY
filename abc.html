@@ -1,67 +1,29 @@
-import os
-import concurrent.futures
-from datetime import datetime
-from tqdm import tqdm
+import csv
 
-# Assuming compare_csv and get_files_from_folder are already defined
+# Define the input string with indices you want to match
+input_indices = "0,2,3,4,5,6,7,7"
+# Convert it into a list of integers
+input_indices = list(map(int, input_indices.split(',')))
 
-def compare_multiple_files(source_folder, destination_folder, primary_key_columns, output_file, use_multithreading=True):
-    report_start_time = datetime.now()
+# Initialize an empty list to store the corresponding values
+result_values = []
 
-    source_files = get_files_from_folder(source_folder)
-    destination_files = get_files_from_folder(destination_folder)
-    files_to_compare = [f for f in source_files if f in destination_files]
+# Open and read the CSV file
+with open('test.csv', mode='r') as file:
+    reader = csv.reader(file)
+    
+    # Skip the header if there is one
+    next(reader)
+    
+    # Iterate through each row in the CSV file
+    for row in reader:
+        # Assuming the first column is index and the second column is value
+        index = int(row[0])
+        value = row[1]
+        
+        # Check if the index is in the input_indices list
+        if index in input_indices:
+            result_values.append(value)
 
-    file_comparisons = {}
-
-    # Add "No Comparison" files
-    no_comparison_files = [f for f in source_files if f not in destination_files]
-
-    for file in no_comparison_files:
-        file_comparisons[file] = (None, None)
-
-    if use_multithreading:
-        # Multithreading version
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(compare_csv, os.path.join(source_folder, file), os.path.join(destination_folder, file), primary_key_columns, columns) 
-                       for file in files_to_compare]
-
-            results = []
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Comparing files", ncols=100):
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    print(f"Error comparing files: {e}")
-                    results.append((None, None))
-
-            for file, (diff_df, summary) in zip(files_to_compare, results):
-                file_comparisons[file] = (diff_df, summary)
-    else:
-        # Sequential version for debugging (No multithreading)
-        results = []
-        for file in tqdm(files_to_compare, desc="Comparing files", ncols=100):
-            try:
-                result = compare_csv(os.path.join(source_folder, file), os.path.join(destination_folder, file), primary_key_columns, columns)
-                results.append(result)
-            except Exception as e:
-                print(f"Error comparing {file}: {e}")
-                results.append((None, None))
-
-        for file, (diff_df, summary) in zip(files_to_compare, results):
-            file_comparisons[file] = (diff_df, summary)
-
-    # At this point, file_comparisons will contain the comparison results.
-    # You can write the results to output_file or process them as needed.
-    return file_comparisons
-
-# Example usage with multithreading enabled (True) or disabled (False)
-file_comparisons = compare_multiple_files(
-    source_folder="path/to/source_folder",
-    destination_folder="path/to/destination_folder",
-    primary_key_columns=["id"],
-    output_file="path/to/output_file.csv",
-    use_multithreading=False  # Set this to False to disable multithreading
-)
-
-print(file_comparisons)
+# Print the result as a comma-separated string
+print(', '.join(result_values))

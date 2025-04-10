@@ -75,9 +75,14 @@ def read_all_csvs_multithreaded(zip_keys, store_dict):
         futures = [executor.submit(read_zip_and_store, zip_key, store_dict) for zip_key in zip_keys]
         for future in futures:
             future.result()  # Wait for all to complete
+            
 
 
 
 
 read_all_csvs(source1_zips, all_csvs_source1)
 read_all_csvs(source2_zips, all_csvs_source2)
+
+
+read_all_csvs_multithreaded(source1_zips, all_csvs_source1)
+read_all_csvs_multithreaded(source2_zips, all_csvs_source2)

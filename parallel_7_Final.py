@@ -52,3 +52,32 @@ def run_comparison():
 
     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
     return final_diff_df, all_summaries
+
+
+
+
+
+def read_zip_and_store(zip_key, store_dict):
+    try:
+        csvs = read_zip_from_s3(zip_key)
+        for name, df in csvs.items():
+            # Thread-safe write (if store_dict is shared)
+            with threading.Lock():
+                if name in store_dict:
+                    print(f"⚠️ Duplicate CSV found: {name} from {zip_key} — using the first one.")
+                else:
+                    store_dict[name] = df
+    except Exception as e:
+        print(f"❌ Failed to read zip: {zip_key} | Error: {e}")
+
+def read_all_csvs_multithreaded(zip_keys, store_dict):
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(read_zip_and_store, zip_key, store_dict) for zip_key in zip_keys]
+        for future in futures:
+            future.result()  # Wait for all to complete
+
+
+
+
+read_all_csvs(source1_zips, all_csvs_source1)
+read_all_csvs(source2_zips, all_csvs_source2)

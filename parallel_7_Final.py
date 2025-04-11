@@ -160,3 +160,99 @@ def run_comparison():
     return final_diff_df, all_summaries
 
 
+
+
+--------------------------------------------------------------------------
+def compare_csvs(df1, df2, file_name):
+    summary = {
+        'Missing Columns in File2': [],
+        'Missing Columns in File1': [],
+        'Missing Rows in File2': 0,
+        'Extra Rows in File2': 0,
+        'Duplicate Rows in File1': 0,
+        'Duplicate Rows in File2': 0,
+        'Total Fields Compared': 0,
+        'Number of Discrepancies': 0,
+        'Failure %': 0.0,
+        'Pass %': 0.0
+    }
+    diff_summary = []
+
+    # Filter columns if specified
+    if csv_columns:
+        df1 = df1[csv_columns]
+        df2 = df2[csv_columns]
+
+    # Identify missing columns
+    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
+    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
+    
+    # Use only common columns for comparison
+    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
+    if not common_columns:
+        print(f"No common columns to compare in {file_name}")
+        return pd.DataFrame(), summary
+
+    # Drop rows missing primary key values
+    df1 = df1.dropna(subset=csv_primary_keys)
+    df2 = df2.dropna(subset=csv_primary_keys)
+
+    # Add original row number
+    df1['_original_row'] = range(len(df1))
+    df2['_original_row'] = range(len(df2))
+
+    # Set primary key index
+    df1.set_index(csv_primary_keys, inplace=True)
+    df2.set_index(csv_primary_keys, inplace=True)
+
+    # Check for duplicates and remove them
+    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
+    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
+
+    df1 = df1[~df1.index.duplicated()]
+    df2 = df2[~df2.index.duplicated()]
+
+    # Find missing and extra rows
+    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
+    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
+
+    # Compare shared rows
+    common_idx = df1.index.intersection(df2.index)
+    total_fields = 0
+    mismatches = 0
+
+    for idx in common_idx:
+        row1 = df1.loc[idx]
+        row2 = df2.loc[idx]
+        row1_number = int(row1['_original_row']) if '_original_row' in row1 else None
+        row2_number = int(row2['_original_row']) if '_original_row' in row2 else None
+
+        for col in common_columns:
+            val1 = row1[col] if col in row1 else None
+            val2 = row2[col] if col in row2 else None
+            total_fields += 1
+            if pd.isnull(val1) and pd.isnull(val2):
+                continue
+            if val1 != val2:
+                mismatches += 1
+                diff_summary.append({
+                    'PrimaryKey': idx,
+                    'Column': col,
+                    'File1_Value': val1,
+                    'File2_Value': val2,
+                    'RowNum_File1': row1_number,
+                    'RowNum_File2': row2_number,
+                    'Status': 'Mismatch'
+                })
+
+    # Final stats
+    summary['Total Fields Compared'] = total_fields
+    summary['Number of Discrepancies'] = mismatches
+    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
+    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
+
+    # Prepare mismatch DataFrame
+    diff_df = pd.DataFrame(diff_summary)
+    return diff_df, summary
+
+

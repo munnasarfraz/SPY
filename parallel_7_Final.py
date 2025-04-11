@@ -18,10 +18,9 @@ def generate_html_report(
     include_passed=True,
     include_missing_in_dest=True
 ):
-
     report_end_time = datetime.now()
     time_taken = report_end_time - report_start_time
-    time_taken_str = str(time_taken).split('.')[0]
+    time_taken_str = str(time_taken).split('.')[0]  # HH:MM:SS
 
     comparison_rows = ""
 
@@ -172,4 +171,47 @@ def generate_html_report(
 </head>
 <body>
 <header>
-    <
+    <h1>{project_name} - CSV Comparison Report</h1>
+    <p><strong>Generated:</strong> {report_start_time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+</header>
+<div class="container">
+    <h2>📋 Summary</h2>
+    <ul>
+        <li><strong>Duration:</strong> {time_taken_str}</li>
+        <li><strong>Source Files:</strong> {source_files_count}</li>
+        <li><strong>Destination Files:</strong> {destination_files_count}</li>
+        <li><strong>Primary Keys:</strong> {', '.join(primary_key_columns)}</li>
+        <li><strong>Compared Columns:</strong> {"All Columns" if not columns else ', '.join(columns)}</li>
+    </ul>
+
+    <h2>📊 Overall Summary</h2>
+    <ul>
+        <li><strong>Total Fields Compared:</strong> {total_fields_compared}</li>
+        <li><strong>Total Discrepancies:</strong> {total_discrepancies}</li>
+        <li><strong>Overall Pass %:</strong> {overall_pass}%</li>
+        <li><strong>Overall Failure %:</strong> {overall_fail}%</li>
+    </ul>
+
+    <h2>🧾 Comparison Results</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>CSV File</th>
+                <th>Status</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            {comparison_rows}
+        </tbody>
+    </table>
+</div>
+</body>
+</html>
+"""
+
+    with open(output_file, "w", encoding='utf-8') as f:
+        f.write(html_template)
+
+    print(f"✅ HTML report written to {output_file}")
+    return output_file

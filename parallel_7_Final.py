@@ -186,37 +186,38 @@ def compare_csvs(df1, df2, file_name):
     # Identify missing columns
     summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
     summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-    
-    # Use only common columns for comparison
+
+    # Only use common columns for comparison
     common_columns = list(set(df1.columns).intersection(set(df2.columns)))
     if not common_columns:
         print(f"No common columns to compare in {file_name}")
         return pd.DataFrame(), summary
 
-    # Drop rows missing primary key values
+    # Reset index and store original row numbers before filtering/indexing
+    df1 = df1.reset_index(drop=True)
+    df2 = df2.reset_index(drop=True)
+    df1['_original_row'] = df1.index + 1  # 1-based indexing (optional)
+    df2['_original_row'] = df2.index + 1
+
+    # Drop rows with missing primary keys
     df1 = df1.dropna(subset=csv_primary_keys)
     df2 = df2.dropna(subset=csv_primary_keys)
 
-    # Add original row number
-    df1['_original_row'] = range(len(df1))
-    df2['_original_row'] = range(len(df2))
-
-    # Set primary key index
+    # Set primary key as index
     df1.set_index(csv_primary_keys, inplace=True)
     df2.set_index(csv_primary_keys, inplace=True)
 
-    # Check for duplicates and remove them
+    # Detect and remove duplicates
     summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
     summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
-
     df1 = df1[~df1.index.duplicated()]
     df2 = df2[~df2.index.duplicated()]
 
-    # Find missing and extra rows
+    # Compare row existence
     summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
     summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
 
-    # Compare shared rows
+    # Compare matching rows
     common_idx = df1.index.intersection(df2.index)
     total_fields = 0
     mismatches = 0
@@ -245,14 +246,17 @@ def compare_csvs(df1, df2, file_name):
                     'Status': 'Mismatch'
                 })
 
-    # Final stats
+    # Summary calculations
     summary['Total Fields Compared'] = total_fields
     summary['Number of Discrepancies'] = mismatches
     summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
     summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
 
-    # Prepare mismatch DataFrame
+    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
+        summary['Note'] = '✅ No comparison issues, files are identical'
+
     diff_df = pd.DataFrame(diff_summary)
     return diff_df, summary
+
 
 

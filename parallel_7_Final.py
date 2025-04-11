@@ -442,3 +442,23 @@ generate_html_report(
         columns=csv_columns
     )
 
+===========================================
+import os
+import subprocess
+
+# Absolute path to HTML report
+report_path = os.path.abspath("csv_comparison_report.html")
+
+# Path to Microsoft Edge (default install location for most Windows systems)
+edge_exe_path = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+# If that doesn't exist, try Program Files
+if not os.path.exists(edge_exe_path):
+    edge_exe_path = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+
+# Launch Edge with the file
+if os.path.exists(edge_exe_path):
+    subprocess.Popen([edge_exe_path, report_path])
+    print(f"✅ Opened report in Edge: {report_path}")
+else:
+    print("❌ Microsoft Edge not found. Please check installation path.")

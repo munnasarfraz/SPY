@@ -247,3 +247,81 @@ def generate_html_report(
 
     print(f"✅ HTML report written to {output_file}")
     return output_file
+
+
+........................................
+import boto3
+import paramiko
+import subprocess
+import time
+import webbrowser
+
+# === CONFIG ===
+# Profile and region configuration
+session = boto3.Session(profile_name="p3dev")
+ec2_client = session.client('ec2', region_name='us-west-2')  # Update region if necessary
+
+# === 1. Fetch EC2 Instance ID, Public IP, and Private IP ===
+response = ec2_client.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+instances = response['Reservations'][0]['Instances']
+
+# Ensure there is exactly one instance running
+if len(instances) != 1:
+    raise ValueError("There should be exactly one running EC2 instance.")
+instance = instances[0]
+
+# Get the Instance ID, Public IP, and Private IP
+ec2_instance_id = instance['InstanceId']
+ec2_public_ip = instance.get('PublicIpAddress')  # Public IP of the EC2 instance
+ec2_private_ip = instance['PrivateIpAddress']    # Private IP of the EC2 instance
+
+# === 2. SSM Client to Run Command Remotely ===
+ssm_client = session.client('ssm')
+
+# Command to start the HTTP server on EC2
+start_server_command = "cd /home/ubuntu/development && nohup python3 -m http.server 8000 > /dev/null 2>&1 &"
+
+# Send command to EC2 via SSM
+response = ssm_client.send_command(
+    InstanceIds=[ec2_instance_id],
+    DocumentName="AWS-RunShellScript",
+    Parameters={'commands': [start_server_command]},
+)
+
+# Get the Command ID (optional)
+command_id = response['Command']['CommandId']
+print(f"Started command with ID: {command_id}")
+
+# === 3. Setup SSH Port Forwarding Using Private IP ===
+# Assuming you have your PEM key in a variable or path
+pem_key = "C:/path/to/your/key.pem"  # You still need the PEM key for SSH connection
+
+# Port forwarding command (using Private IP for SSH)
+ssh_cmd = [
+    "ssh",
+    "-i", pem_key,
+    "-N",                      # Do not execute remote command
+    "-L", f"8000:localhost:8000",  # Local port to remote port
+    f"ubuntu@{ec2_private_ip}"
+]
+
+# Start the SSH tunnel in the background
+tunnel = subprocess.Popen(ssh_cmd)
+
+# === 4. Wait briefly for the server to start ===
+time.sleep(2)
+
+# === 5. Open the Report in the Browser ===
+url = f"http://localhost:8000/report.html"
+print(f"Opening {url} in browser...")
+webbrowser.open(url)
+
+# === 6. Keep the script running while user views the file ===
+print("Press Ctrl+C to stop the server and close the tunnel.")
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\nClosing tunnel...")
+    tunnel.terminate()
+    print("Done.")

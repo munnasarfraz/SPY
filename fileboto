@@ -1,0 +1,260 @@
+import boto3
+import pandas as pd
+import io
+import zipfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+from datetime import datetime
+import re
+import configparser
+import os
+
+# ------------------ CONFIG ------------------
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+project_name = config['settings']['project_name']
+project_logo = config['settings']['project_logo']
+
+output_dir = config['report']['output_dir']
+output_file = config['report']['output_file']
+
+csv_primary_keys = config['keys']['primary_key_columns'].split(',')
+csv_columns = config['keys']['columns']
+csv_columns = csv_columns.split(',') if csv_columns else None
+
+bucket_name = config['aws']['bucket_name']
+source_1_prefix = config['aws']['source_1_prefix']
+source_2_prefix = config['aws']['source_2_prefix']
+download_zip_to_local = config['aws'].get('download_zip_to_local', 'false').lower() == 'true'
+local_zip_dir = config['aws'].get('local_zip_dir', './downloads/zips')
+local_extract_dir = config['aws'].get('local_extract_dir', './downloads/extracted')
+
+use_multithreading_reading = config['threading']['use_multithreading_reading']
+use_multithreading_comparision = config['threading']['use_multithreading_comparision']
+
+include_passed = bool(config['report_custom']['include_passed'])
+include_missing_files = bool(config['report_custom']['include_missing_files'])
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+base_name, ext = os.path.splitext(output_file)
+extension = ext if ext else ".html"
+
+output_file = f"{base_name}_{timestamp}{extension}"
+output_file = os.path.join(output_dir, output_file)
+
+def create_dir(_dir_path):
+    if _dir_path and not os.path.exists(_dir_path):
+        os.makedirs(_dir_path)
+
+create_dir(output_dir)
+
+# ------------------ UTILS ------------------
+
+def normalize_filename(filename):
+    return re.sub(r'\d{8}_\d{4}', '', filename)
+
+def get_s3_client(profile_name='p3-dev'):
+    session = boto3.session.Session(profile_name=profile_name)
+    return session.client('s3')
+
+s3 = get_s3_client()
+
+def list_zip_files(prefix):
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+    return [content['Key'] for content in response.get('Contents', []) if content['Key'].endswith('.zip')]
+
+def download_zip_from_s3(zip_key, local_dir):
+    create_dir(local_dir)
+    local_path = os.path.join(local_dir, os.path.basename(zip_key))
+    if not os.path.exists(local_path):
+        with open(local_path, 'wb') as f:
+            s3.download_fileobj(bucket_name, zip_key, f)
+    return local_path
+
+def extract_zip_file(zip_path, extract_to):
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+
+def read_zip(zip_key, source_name=''):
+    csv_files = {}
+    if download_zip_to_local:
+        local_zip = download_zip_from_s3(zip_key, os.path.join(local_zip_dir, source_name))
+        extract_path = os.path.join(local_extract_dir, source_name, os.path.splitext(os.path.basename(zip_key))[0])
+        create_dir(extract_path)
+        extract_zip_file(local_zip, extract_path)
+
+        for filename in tqdm(os.listdir(extract_path), desc=f"CSVs in {zip_key}", leave=False, unit="csv"):
+            if filename.endswith('.csv'):
+                full_path = os.path.join(extract_path, filename)
+                df = pd.read_csv(full_path, low_memory=False)
+                csv_files[filename] = df
+    else:
+        zip_obj = s3.get_object(Bucket=bucket_name, Key=zip_key)
+        zip_data = zipfile.ZipFile(io.BytesIO(zip_obj['Body'].read()))
+        for filename in tqdm(zip_data.namelist(), desc=f"CSVs in {zip_key.split('/')[-1]}", leave=False, unit="csv"):
+            if filename.endswith('.csv'):
+                with zip_data.open(filename) as f:
+                    df = pd.read_csv(f, low_memory=False)
+                    csv_files[filename] = df
+    return csv_files
+
+def compare_csvs(df1, df2, file_name):
+    summary = {
+        'Missing Columns in File2': [],
+        'Missing Columns in File1': [],
+        'Missing Rows in File2': 0,
+        'Extra Rows in File2': 0,
+        'Duplicate Rows in File1': 0,
+        'Duplicate Rows in File2': 0,
+        'Total Fields Compared': 0,
+        'Number of Discrepancies': 0,
+        'Failure %': 0.0,
+        'Pass %': 0.0
+    }
+    diff_summary = []
+
+    if csv_columns:
+        df1 = df1[csv_columns]
+        df2 = df2[csv_columns]
+
+    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
+    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
+    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
+    if not common_columns:
+        return pd.DataFrame(), summary
+
+    df1 = df1.reset_index(drop=True)
+    df2 = df2.reset_index(drop=True)
+    df1['_original_row'] = df1.index + 1
+    df2['_original_row'] = df2.index + 1
+
+    df1 = df1.dropna(subset=csv_primary_keys)
+    df2 = df2.dropna(subset=csv_primary_keys)
+
+    df1.set_index(csv_primary_keys, inplace=True)
+    df2.set_index(csv_primary_keys, inplace=True)
+
+    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
+    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
+    df1 = df1[~df1.index.duplicated()]
+    df2 = df2[~df2.index.duplicated()]
+
+    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
+    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
+
+    common_idx = df1.index.intersection(df2.index)
+    total_fields = mismatches = 0
+
+    for idx in tqdm(common_idx, desc="Comparing rows", unit="rows", ncols=100):
+        row1 = df1.loc[idx]
+        row2 = df2.loc[idx]
+        for col in common_columns:
+            val1 = row1[col] if col in row1 else None
+            val2 = row2[col] if col in row2 else None
+            total_fields += 1
+            if pd.isnull(val1) and pd.isnull(val2):
+                continue
+            if val1 != val2:
+                mismatches += 1
+                diff_summary.append({
+                    'PrimaryKey': idx,
+                    'Column': col,
+                    'File1_Value': val1,
+                    'File2_Value': val2,
+                    'RowNum_File1': row1['_original_row'],
+                    'RowNum_File2': row2['_original_row'],
+                    'Status': 'Mismatch'
+                })
+
+    summary['Total Fields Compared'] = total_fields
+    summary['Number of Discrepancies'] = mismatches
+    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
+    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
+
+    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
+        summary['Note'] = '✅ No comparison issues, files are identical'
+
+    return pd.DataFrame(diff_summary), summary
+
+# ------------------ MAIN PROCESS ------------------
+
+def run_comparison():
+    source1_zips = list_zip_files(source_1_prefix)
+    source2_zips = list_zip_files(source_2_prefix)
+
+    all_csvs_source1 = {}
+    all_csvs_source2 = {}
+
+    def read_zip_and_store(zip_key, store_dict, source_name):
+        try:
+            csvs = read_zip(zip_key, source_name)
+            for name, df in csvs.items():
+                with threading.Lock():
+                    if name not in store_dict:
+                        store_dict[name] = df
+        except Exception as e:
+            print(f"❌ Failed to read zip: {zip_key} | Error: {e}")
+
+    def read_all_csvs_multithreaded(zip_keys, store_dict, source_name):
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(read_zip_and_store, zip_key, store_dict, source_name)
+                for zip_key in zip_keys
+            ]
+            for future in futures:
+                future.result()
+
+    if use_multithreading_reading:
+        read_all_csvs_multithreaded(source1_zips, all_csvs_source1, "source1")
+        read_all_csvs_multithreaded(source2_zips, all_csvs_source2, "source2")
+    else:
+        for zip_key in tqdm(source1_zips, desc="Reading source1 zips"):
+            read_zip_and_store(zip_key, all_csvs_source1, "source1")
+        for zip_key in tqdm(source2_zips, desc="Reading source2 zips"):
+            read_zip_and_store(zip_key, all_csvs_source2, "source2")
+
+    normalized_source1_files = {normalize_filename(file): file for file in all_csvs_source1.keys()}
+    normalized_source2_files = {normalize_filename(file): file for file in all_csvs_source2.keys()}
+
+    common_csvs = set(normalized_source1_files.keys()) & set(normalized_source2_files.keys())
+    missing_in_source2 = set(normalized_source1_files.keys()) - set(normalized_source2_files.keys())
+    missing_in_source1 = set(normalized_source2_files.keys()) - set(normalized_source1_files.keys())
+
+    all_diffs = []
+    all_summaries = {}
+
+    def process_csv_pair(csv_name):
+        original_file1 = normalized_source1_files[csv_name]
+        original_file2 = normalized_source2_files[csv_name]
+        df1 = all_csvs_source1[original_file1]
+        df2 = all_csvs_source2[original_file2]
+        return compare_csvs(df1, df2, original_file1)
+
+    if use_multithreading_comparision:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(process_csv_pair, common_csvs))
+    else:
+        results = [process_csv_pair(csv_name) for csv_name in common_csvs]
+
+    for csv_name, result in zip(common_csvs, results):
+        diff_df, summary = result
+        if not diff_df.empty:
+            diff_df['File'] = csv_name
+            all_diffs.append(diff_df)
+        all_summaries[csv_name] = summary
+
+    if missing_in_source2:
+        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
+    if missing_in_source1:
+        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
+
+    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
+    return final_diff_df, all_summaries
+
+# ------------------ RUN ------------------
+if __name__ == "__main__":
+    print(f"▶️ Start: {datetime.now()}")
+    diff_df, summary = run_comparison()
+    print(f"✅ Done: {datetime.now()}")

@@ -830,3 +830,6 @@ def generate_html_report(
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(html_template)
 
+------------------------------
+<li><strong>Overall Pass %:</strong> <span style="background-color: #d4edda; color: #155724; padding: 2px 6px; border-radius: 4px;">{overall_pass}%</span></li>
+<li><strong>Overall Failure %:</strong> <span style="background-color: #f8d7da; color: #721c24; padding: 2px 6px; border-radius: 4px;">{overall_fail}%</span></li>

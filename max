@@ -56,6 +56,24 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 log_handler.setFormatter(formatter)
 logger.addHandler(log_handler)
 
+
+# ------------------ DELETE OLD FILES ------------------
+    # Delete all files in the local ZIP download directory
+    if os.path.exists(local_zip_dir):
+        logger.info(f"Deleting all ZIP files in: {local_zip_dir}")
+        for filename in os.listdir(local_zip_dir):
+            file_path = os.path.join(local_zip_dir, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+
+    # Delete all files in the local extracted directory
+    if os.path.exists(local_extract_dir):
+        logger.info(f"Deleting all extracted files in: {local_extract_dir}")
+        for filename in os.listdir(local_extract_dir):
+            dir_path = os.path.join(local_extract_dir, filename)
+            if os.path.isdir(dir_path):
+                shutil.rmtree(dir_path)  # Recursively delete directories
+
 # ------------------ UTILS ------------------
 
 def normalize_filename(filename):
@@ -265,3 +283,7 @@ def run_comparison():
 
     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
     return final_diff_df, all_summaries
+
+
+
+----------------------

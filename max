@@ -287,3 +287,58 @@ def run_comparison():
 
 
 ----------------------
+
+
+
+def read_zip(zip_key, source_name='', chunk_size=5):
+    csv_files = {}
+
+    try:
+        if download_zip_to_local:
+            # Handle local ZIP download & extraction
+            local_zip = download_zip_from_s3(zip_key, os.path.join(local_zip_dir, source_name))
+            extract_path = os.path.join(local_extract_dir, source_name, os.path.splitext(os.path.basename(zip_key))[0])
+            create_dir(extract_path)
+            extract_zip_file(local_zip, extract_path)
+
+            # List CSV files and process in chunks
+            all_csvs = [f for f in os.listdir(extract_path) if f.endswith('.csv')]
+            total_chunks = (len(all_csvs) + chunk_size - 1) // chunk_size
+
+            for i in range(0, len(all_csvs), chunk_size):
+                chunk = all_csvs[i:i+chunk_size]
+                print(f"📁 Processing local chunk {i//chunk_size + 1}/{total_chunks} from: {zip_key}", flush=True)
+
+                for filename in tqdm(chunk, desc=f"Chunk {i//chunk_size + 1}", unit="csv"):
+                    full_path = os.path.join(extract_path, filename)
+                    try:
+                        df = pd.read_csv(full_path, low_memory=False)
+                        csv_files[filename] = df
+                    except Exception as e:
+                        print(f"❌ Error reading {filename}: {e}")
+
+        else:
+            # Read ZIP from S3
+            zip_obj = s3.get_object(Bucket=bucket_name, Key=zip_key)
+            zip_data = zipfile.ZipFile(io.BytesIO(zip_obj['Body'].read()))
+
+            all_csvs = [name for name in zip_data.namelist() if name.endswith('.csv')]
+            total_chunks = (len(all_csvs) + chunk_size - 1) // chunk_size
+
+            for i in range(0, len(all_csvs), chunk_size):
+                chunk = all_csvs[i:i+chunk_size]
+                print(f"☁️ Processing S3 chunk {i//chunk_size + 1}/{total_chunks} from: {zip_key}", flush=True)
+
+                for filename in tqdm(chunk, desc=f"Chunk {i//chunk_size + 1}", unit="csv"):
+                    try:
+                        with zip_data.open(filename) as f:
+                            df = pd.read_csv(f, low_memory=False)
+                            csv_files[filename] = df
+                    except Exception as e:
+                        print(f"❌ Error reading {filename} from S3 ZIP: {e}")
+
+    except Exception as e:
+        print(f"❌ Failed to process ZIP {zip_key}: {e}")
+
+    return csv_files
+

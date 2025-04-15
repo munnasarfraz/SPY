@@ -349,4 +349,57 @@ def run_comparison():
 
     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
     return final_diff_df, all_summaries
-
+===================================++++++++++++++++++++++++++++++++
+Traceback (most recent call last):
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 532, in <module>
+    diff_df, summary, list_files = run_comparison()
+                                   ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 506, in run_comparison
+    results = list(executor.map(process_pair, common_csvs))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 494, in process_pair
+    result = csv_name, *compare_csvs(df1, df2, file1)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 163, in compare_csvs
+    df1_common = df1.loc[common_idx, common_columns]
+                 ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1184, in __getitem__
+    return self._getitem_tuple(key)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1368, in _getitem_tuple
+    return self._getitem_lowerdim(tup)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1041, in _getitem_lowerdim
+    return self._getitem_nested_tuple(tup)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1153, in _getitem_nested_tuple
+    obj = getattr(obj, self.name)._getitem_axis(key, axis=axis)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1420, in _getitem_axis
+    return self._getitem_iterable(key, axis=axis)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1360, in _getitem_iterable
+    keyarr, indexer = self._get_listlike_indexer(key, axis)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1558, in _get_listlike_indexer
+    keyarr, indexer = ax._get_indexer_strict(key, axis_name)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexes/base.py", line 6200, in _get_indexer_strict
+    self._raise_if_missing(keyarr, indexer, axis_name)
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexes/base.py", line 6252, in _raise_if_missing
+    raise KeyError(f"{not_found} not in index")
+KeyError: "['TRF', 'CUR', 'Routing Inbound', 'ORIG Add-On Zone', 'DEST Add-On Fare Class', 'Fare Class', 'ORIG Add-On RTG', 'DEST', 'CXR', 'ORIG Add-On FN', 'DEST Add-On LOC 1', 'DEST Add-On RTG', 'FN', 'ORIG Add-On LOC 2', 'DEST Add-On Zone', 'Routing Outbound', 'ORIG Add-On Fare Class', 'DEST Add-On FN', 'ORIG', 'ORIG Add-On LOC 1', 'RTG', 'DEST Add-On LOC 2', 'O/R'] not in index"

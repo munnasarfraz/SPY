@@ -538,6 +538,20 @@ def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
     summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
     summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
 
+
+
+-----------------
+# Validate primary keys
+if not csv_primary_keys or not all(isinstance(k, str) and k.strip() for k in csv_primary_keys):
+    raise ValueError("❌ 'csv_primary_keys' must be a non-empty list of valid column names")
+
+missing_keys_df1 = [k for k in csv_primary_keys if k not in df1.columns]
+missing_keys_df2 = [k for k in csv_primary_keys if k not in df2.columns]
+
+if missing_keys_df1 or missing_keys_df2:
+    summary['Note'] = f"❌ Missing primary key(s): {missing_keys_df1 or ''} {missing_keys_df2 or ''}"
+    return pd.DataFrame(), summary
+
     if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
         summary['Note'] = '✅ No comparison issues, files are identical'
 

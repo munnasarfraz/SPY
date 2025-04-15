@@ -157,3 +157,27 @@ Traceback (most recent call last):
     for (idx, col), is_mismatch in tqdm(mismatch_locs.items(), desc=f"Comparing rows: {file_name}", unit="mismatch", leave=False):
         ^^^^^^^^^^
 ValueError: too many values to unpack (expected 2)
+
+
+0000000000000000000000000000000
+for item in tqdm(mismatch_locs.items(), desc=f"Comparing rows: {file_name}", unit="mismatch", leave=False):
+    if isinstance(item[0], tuple) and len(item[0]) == 2:
+        idx, col = item[0]
+    else:
+        # Fallback in case index is not a tuple — shouldn't usually happen
+        idx, col = item[0], 'Unknown'
+
+    val1 = df1_common.at[idx, col] if col in df1_common.columns else None
+    val2 = df2_common.at[idx, col] if col in df2_common.columns else None
+    row1_num = df1_common.at[idx, '_original_row'] if '_original_row' in df1_common.columns else None
+    row2_num = df2_common.at[idx, '_original_row'] if '_original_row' in df2_common.columns else None
+    diff_summary.append({
+        'PrimaryKey': idx,
+        'Column': col,
+        'File1_Value': val1,
+        'File2_Value': val2,
+        'RowNum_File1': row1_num,
+        'RowNum_File2': row2_num,
+        'Status': 'Mismatch'
+    })
+

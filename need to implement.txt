@@ -1,446 +1,7 @@
-import boto3
-import pandas as pd
-import io
-import zipfile
-import os
-import re
-import configparser
-from tqdm import tqdm
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
-
-# --- CONFIG LOADING ---
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-project_name = config['settings']['project_name']
-project_logo = config['settings']['project_logo']
-output_dir = config['report']['output_dir']
-output_file = config['report']['output_file']
-csv_primary_keys = config['keys']['primary_key_columns'].split(',')
-csv_columns = config['keys']['columns']
-if csv_columns: csv_columns = csv_columns.split(',')
-
-bucket_name = config['aws']['bucket_name']
-source_1_prefix = config['aws']['source_1_prefix']
-source_2_prefix = config['aws']['source_2_prefix']
-use_multithreading_reading = config['threading'].getboolean('use_multithreading_reading')
-use_multithreading_comparision = config['threading'].getboolean('use_multithreading_comparision')
-
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-base_name, ext = os.path.splitext(output_file)
-output_file = os.path.join(output_dir, f"{base_name}_{timestamp}{ext or '.html'}")
-os.makedirs(output_dir, exist_ok=True)
-
-def normalize_filename(filename):
-    return re.sub(r'\d{8}_\d{4}', '', filename)
-
-# --- AWS & FILE FUNCTIONS ---
-def get_s3_client(profile_name='p3-dev'):
-    session = boto3.session.Session(profile_name=profile_name)
-    return session.client('s3')
-
-s3 = get_s3_client()
-
-def list_zip_files(prefix):
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    return [item['Key'] for item in response.get('Contents', []) if item['Key'].endswith('.zip')]
-
-def download_zip_from_s3(zip_key, local_dir):
-    os.makedirs(local_dir, exist_ok=True)
-    local_path = os.path.join(local_dir, os.path.basename(zip_key))
-    if not os.path.exists(local_path):
-        s3.download_file(Bucket=bucket_name, Key=zip_key, Filename=local_path)
-    return local_path
-
-def list_csvs_in_local_zip(zip_path):
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        return [name for name in zf.namelist() if name.endswith('.csv')]
-
-def read_csv_from_local_zip(zip_path, csv_name):
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        with zf.open(csv_name) as f:
-            return pd.read_csv(f, low_memory=False)
-
-# --- BUILD MAP OF CSV TO ZIP ---
-def build_csv_to_zip_map(zip_keys, local_dir, csv_map):
-    for zip_key in tqdm(zip_keys, desc=f"Downloading & indexing", unit="zip"):
-        try:
-            local_zip = download_zip_from_s3(zip_key, local_dir)
-            for csv_file in list_csvs_in_local_zip(local_zip):
-                normalized = normalize_filename(csv_file)
-                if normalized not in csv_map:
-                    csv_map[normalized] = (local_zip, csv_file)
-                else:
-                    print(f"⚠️ Duplicate CSV {normalized} already exists.")
-        except Exception as e:
-            print(f"❌ Failed to process {zip_key}: {e}")
-
-# --- COMPARISON FUNCTION ---
-def compare_csvs(df1, df2, file_name):
-    summary = {
-        'Missing Columns in File2': [],
-        'Missing Columns in File1': [],
-        'Missing Rows in File2': 0,
-        'Extra Rows in File2': 0,
-        'Duplicate Rows in File1': 0,
-        'Duplicate Rows in File2': 0,
-        'Total Fields Compared': 0,
-        'Number of Discrepancies': 0,
-        'Failure %': 0.0,
-        'Pass %': 0.0
-    }
-    diff_summary = []
-
-    if csv_columns:
-        df1 = df1[csv_columns]
-        df2 = df2[csv_columns]
-
-    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
-    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
-    if not common_columns:
-        return pd.DataFrame(), summary
-
-    df1 = df1.reset_index(drop=True)
-    df2 = df2.reset_index(drop=True)
-    df1['_original_row'] = df1.index + 1
-    df2['_original_row'] = df2.index + 1
-
-    df1 = df1.dropna(subset=csv_primary_keys)
-    df2 = df2.dropna(subset=csv_primary_keys)
-    df1.set_index(csv_primary_keys, inplace=True)
-    df2.set_index(csv_primary_keys, inplace=True)
-
-    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
-    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
-    df1 = df1[~df1.index.duplicated()]
-    df2 = df2[~df2.index.duplicated()]
-
-    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
-    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
-
-    common_idx = df1.index.intersection(df2.index)
-    total_fields = 0
-    mismatches = 0
-
-    for idx in tqdm(common_idx, desc=f"Comparing rows: {file_name}", unit="row", leave=False):
-        row1 = df1.loc[idx]
-        row2 = df2.loc[idx]
-        row1_num = row1['_original_row'] if '_original_row' in row1 else None
-        row2_num = row2['_original_row'] if '_original_row' in row2 else None
-        for col in common_columns:
-            val1 = row1[col] if col in row1 else None
-            val2 = row2[col] if col in row2 else None
-            total_fields += 1
-            if pd.isnull(val1) and pd.isnull(val2):
-                continue
-            if val1 != val2:
-                mismatches += 1
-                diff_summary.append({
-                    'PrimaryKey': idx,
-                    'Column': col,
-                    'File1_Value': val1,
-                    'File2_Value': val2,
-                    'RowNum_File1': row1_num,
-                    'RowNum_File2': row2_num,
-                    'Status': 'Mismatch'
-                })
-
-    summary['Total Fields Compared'] = total_fields
-    summary['Number of Discrepancies'] = mismatches
-    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
-    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
-    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
-        summary['Note'] = '✅ No comparison issues, files are identical'
-    return pd.DataFrame(diff_summary), summary
-
-# --- MAIN PROCESS ---
-def run_comparison():
-    source1_zips = list_zip_files(source_1_prefix)
-    source2_zips = list_zip_files(source_2_prefix)
-
-    source1_csv_map = {}
-    source2_csv_map = {}
-
-    build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
-    build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
-
-    common_csvs = set(source1_csv_map.keys()) & set(source2_csv_map.keys())
-    missing_in_source2 = set(source1_csv_map.keys()) - set(source2_csv_map.keys())
-    missing_in_source1 = set(source2_csv_map.keys()) - set(source1_csv_map.keys())
-
-    all_diffs = []
-    all_summaries = {}
-
-    def process_pair(csv_name):
-        zip1, file1 = source1_csv_map[csv_name]
-        zip2, file2 = source2_csv_map[csv_name]
-        df1 = read_csv_from_local_zip(zip1, file1)
-        df2 = read_csv_from_local_zip(zip2, file2)
-        return csv_name, *compare_csvs(df1, df2, file1)
-
-    if use_multithreading_comparision:
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            results = list(executor.map(process_pair, common_csvs))
-    else:
-        results = [process_pair(name) for name in tqdm(common_csvs, desc="Comparing files")]
-
-    for csv_name, diff_df, summary in results:
-        if not diff_df.empty:
-            diff_df['File'] = csv_name
-            all_diffs.append(diff_df)
-        all_summaries[csv_name] = summary
-
-    if missing_in_source2:
-        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
-    if missing_in_source1:
-        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
-
-    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
-    return final_diff_df, all_summaries
-
-# --- ENTRY POINT ---
-if __name__ == "__main__":
-    print('---------------- CSV Comparison Started ----------------')
-    start = datetime.now()
-    diff_df, summary = run_comparison()
-    print('---------------- CSV Comparison Finished ----------------')
-    print(f"⏱ Duration: {datetime.now() - start}")
-
-
-
-
-======================================
-def compare_csvs(df1, df2, file_name):
-    summary = {
-        'Missing Columns in File2': [],
-        'Missing Columns in File1': [],
-        'Missing Rows in File2': 0,
-        'Extra Rows in File2': 0,
-        'Duplicate Rows in File1': 0,
-        'Duplicate Rows in File2': 0,
-        'Total Fields Compared': 0,
-        'Number of Discrepancies': 0,
-        'Failure %': 0.0,
-        'Pass %': 0.0
-    }
-    diff_summary = []
-
-    if csv_columns:
-        df1 = df1[csv_columns]
-        df2 = df2[csv_columns]
-
-    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
-    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
-    if not common_columns:
-        return pd.DataFrame(), summary
-
-    df1 = df1.dropna(subset=csv_primary_keys)
-    df2 = df2.dropna(subset=csv_primary_keys)
-
-    df1.set_index(csv_primary_keys, inplace=True)
-    df2.set_index(csv_primary_keys, inplace=True)
-
-    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
-    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
-    df1 = df1[~df1.index.duplicated()]
-    df2 = df2[~df2.index.duplicated()]
-
-    # Shortcut: if DataFrames are identical, skip comparison
-    if df1.equals(df2):
-        summary['Note'] = '✅ Files are completely identical'
-        return pd.DataFrame(), summary
-
-    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
-    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
-
-    common_idx = df1.index.intersection(df2.index)
-
-    # Optional vectorized difference (faster than loop)
-    df1_common = df1.loc[common_idx, common_columns]
-    df2_common = df2.loc[common_idx, common_columns]
-    diffs = df1_common.ne(df2_common)
-
-    total_fields = diffs.size
-    mismatches = diffs.sum().sum()
-
-    summary['Total Fields Compared'] = total_fields
-    summary['Number of Discrepancies'] = mismatches
-    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
-    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
-
-    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
-        summary['Note'] = '✅ No comparison issues, files are identical'
-
-    # Build detailed diff summary if needed
-    for idx in diffs.index:
-        for col in diffs.columns:
-            if diffs.loc[idx, col]:
-                diff_summary.append({
-                    'PrimaryKey': idx,
-                    'Column': col,
-                    'File1_Value': df1_common.at[idx, col],
-                    'File2_Value': df2_common.at[idx, col],
-                    'Status': 'Mismatch'
-                })
-
-    return pd.DataFrame(diff_summary), summary
-================================================
-================================================
-from tqdm.contrib.concurrent import thread_map
-from multiprocessing import Manager
-
-def run_comparison():
-    source1_zips = list_zip_files(source_1_prefix)
-    source2_zips = list_zip_files(source_2_prefix)
-
-    source1_csv_map = {}
-    source2_csv_map = {}
-
-    build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
-    build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
-
-    common_csvs = set(source1_csv_map.keys()) & set(source2_csv_map.keys())
-    missing_in_source2 = set(source1_csv_map.keys()) - set(source2_csv_map.keys())
-    missing_in_source1 = set(source2_csv_map.keys()) - set(source1_csv_map.keys())
-
-    all_diffs = []
-    all_summaries = {}
-
-    # Shared lock for tqdm update
-    manager = Manager()
-    counter = manager.Value('i', 0)
-    lock = manager.Lock()
-
-    # Function for threaded progress
-    def process_pair(csv_name):
-        zip1, file1 = source1_csv_map[csv_name]
-        zip2, file2 = source2_csv_map[csv_name]
-        df1 = read_csv_from_local_zip(zip1, file1)
-        df2 = read_csv_from_local_zip(zip2, file2)
-        result = csv_name, *compare_csvs(df1, df2, file1)
-
-        # Thread-safe tqdm update
-        with lock:
-            counter.value += 1
-            pbar.update(1)
-        return result
-
-    print(f"🔍 Comparing {len(common_csvs)} common CSV files...")
-    with tqdm(total=len(common_csvs), desc="Overall Comparison Progress") as pbar:
-        if use_multithreading_comparision:
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                results = list(executor.map(process_pair, common_csvs))
-        else:
-            results = [process_pair(name) for name in common_csvs]
-
-    for csv_name, diff_df, summary in results:
-        if not diff_df.empty:
-            diff_df['File'] = csv_name
-            all_diffs.append(diff_df)
-        all_summaries[csv_name] = summary
-
-    if missing_in_source2:
-        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
-    if missing_in_source1:
-        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
-
-    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
-    return final_diff_df, all_summaries
-===================================++++++++++++++++++++++++++++++++
-def compare_csvs(df1, df2, file_name):
-    summary = {
-        'Missing Columns in File2': [],
-        'Missing Columns in File1': [],
-        'Missing Rows in File2': 0,
-        'Extra Rows in File2': 0,
-        'Duplicate Rows in File1': 0,
-        'Duplicate Rows in File2': 0,
-        'Total Fields Compared': 0,
-        'Number of Discrepancies': 0,
-        'Failure %': 0.0,
-        'Pass %': 0.0
-    }
-    diff_summary = []
-
-    if csv_columns:
-        df1 = df1[csv_columns]
-        df2 = df2[csv_columns]
-
-    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
-    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
-    if not common_columns:
-        return pd.DataFrame(), summary
-
-    df1 = df1.reset_index(drop=True)
-    df2 = df2.reset_index(drop=True)
-    df1['_original_row'] = df1.index + 1
-    df2['_original_row'] = df2.index + 1
-
-    df1 = df1.dropna(subset=csv_primary_keys)
-    df2 = df2.dropna(subset=csv_primary_keys)
-    df1.set_index(csv_primary_keys, inplace=True)
-    df2.set_index(csv_primary_keys, inplace=True)
-
-    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
-    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
-    df1 = df1[~df1.index.duplicated()]
-    df2 = df2[~df2.index.duplicated()]
-
-    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
-    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
-
-    common_idx = df1.index.intersection(df2.index)
-    total_fields = 0
-    mismatches = 0
-
-    for idx in tqdm(common_idx, desc=f"Comparing rows: {file_name}", unit="row", leave=False):
-        row1 = df1.loc[idx]
-        row2 = df2.loc[idx]
-        row1_num = row1['_original_row'] if '_original_row' in row1 else None
-        row2_num = row2['_original_row'] if '_original_row' in row2 else None
-        for col in common_columns:
-            val1 = row1[col] if col in row1 else None
-            val2 = row2[col] if col in row2 else None
-            total_fields += 1
-            if pd.isnull(val1) and pd.isnull(val2):
-                continue
-            if val1 != val2:
-                mismatches += 1
-                diff_summary.append({
-                    'PrimaryKey': idx,
-                    'Column': col,
-                    'File1_Value': val1,
-                    'File2_Value': val2,
-                    'RowNum_File1': row1_num,
-                    'RowNum_File2': row2_num,
-                    'Status': 'Mismatch'
-                })
-
-    summary['Total Fields Compared'] = total_fields
-    summary['Number of Discrepancies'] = mismatches
-    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
-    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
-    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
-        summary['Note'] = '✅ No comparison issues, files are identical'
-    return pd.DataFrame(diff_summary), summary
-
-
----Final--------------------------
 import pandas as pd
 from tqdm import tqdm
 
 def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
-    if not isinstance(df1, pd.DataFrame) or not isinstance(df2, pd.DataFrame):
-        raise TypeError("Both df1 and df2 must be pandas DataFrames.")
-    if not isinstance(csv_primary_keys, list) or not csv_primary_keys:
-        raise ValueError("csv_primary_keys must be a non-empty list of column names.")
-    if csv_columns and not isinstance(csv_columns, list):
-        raise ValueError("csv_columns must be a list of column names or None.")
-
     summary = {
         'Missing Columns in File2': [],
         'Missing Columns in File1': [],
@@ -455,174 +16,78 @@ def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
     }
     diff_summary = []
 
-    # Filter specific columns if provided
+    # If column filter is provided, apply it to both
     if csv_columns:
-        df1 = df1[[col for col in csv_columns if col in df1.columns]]
-        df2 = df2[[col for col in csv_columns if col in df2.columns]]
+        # Intersect with actual columns to prevent KeyErrors
+        df1_cols = [col for col in csv_columns if col in df1.columns]
+        df2_cols = [col for col in csv_columns if col in df2.columns]
+        df1 = df1[df1_cols]
+        df2 = df2[df2_cols]
 
-    # Check if files are already identical
+    # Quick equality check
     if df1.equals(df2):
         summary['Note'] = '✅ Files are identical — no comparison needed'
         return pd.DataFrame(), summary
 
-    # Column comparison
+    # Identify missing columns
     summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
     summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-
     common_columns = list(set(df1.columns).intersection(set(df2.columns)))
+
+    # Bail if nothing in common
     if not common_columns:
-        summary['Note'] = '❌ No common columns to compare.'
+        summary['Note'] = '❌ No common columns to compare'
         return pd.DataFrame(), summary
 
-    # Ensure primary keys are present
-    missing_keys_df1 = [key for key in csv_primary_keys if key not in df1.columns]
-    missing_keys_df2 = [key for key in csv_primary_keys if key not in df2.columns]
-    if missing_keys_df1 or missing_keys_df2:
-        raise ValueError(f"Missing primary keys: {missing_keys_df1} in df1, {missing_keys_df2} in df2")
+    # Drop rows with missing primary key values
+    if csv_primary_keys:
+        df1 = df1.dropna(subset=csv_primary_keys)
+        df2 = df2.dropna(subset=csv_primary_keys)
+    else:
+        summary['Note'] = '❌ Primary key(s) not provided'
+        return pd.DataFrame(), summary
 
-    # Drop rows with missing primary keys
-    df1 = df1.dropna(subset=csv_primary_keys).copy()
-    df2 = df2.dropna(subset=csv_primary_keys).copy()
-
-    # Add row tracking
+    # Add original row number BEFORE setting index
     df1['_original_row'] = range(1, len(df1) + 1)
     df2['_original_row'] = range(1, len(df2) + 1)
 
-    # Set index to primary keys
-    df1.set_index(csv_primary_keys, inplace=True)
-    df2.set_index(csv_primary_keys, inplace=True)
+    # Set index using primary keys but retain original columns
+    df1.set_index(csv_primary_keys, inplace=True, drop=False)
+    df2.set_index(csv_primary_keys, inplace=True, drop=False)
 
-    # Handle duplicates
+    # Detect duplicates and remove them
     summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
     summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
     df1 = df1[~df1.index.duplicated()]
     df2 = df2[~df2.index.duplicated()]
 
-    # Row presence comparison
+    # Row-level presence checks
     summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
     summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
 
-    # Only compare rows that exist in both files
+    # Only compare rows that exist in both
     common_idx = df1.index.intersection(df2.index)
-    df1_common = df1.loc[common_idx, common_columns + ['_original_row']]
-    df2_common = df2.loc[common_idx, common_columns + ['_original_row']]
 
-    # Vectorized safe comparison (handles NaN == NaN as equal)
-    df1_vals = df1_common[common_columns]
-    df2_vals = df2_common[common_columns]
-    comparison = ~((df1_vals == df2_vals) | (df1_vals.isna() & df2_vals.isna()))
+    # Select valid columns (including _original_row if present)
+    extra_cols = ['_original_row']
+    df1_common_cols = [col for col in common_columns + extra_cols if col in df1.columns]
+    df2_common_cols = [col for col in common_columns + extra_cols if col in df2.columns]
+
+    df1_common = df1.loc[common_idx, df1_common_cols]
+    df2_common = df2.loc[common_idx, df2_common_cols]
+
+    # Compare only common data columns
+    comparison_columns = [col for col in common_columns if col in df1_common.columns and col in df2_common.columns]
+    comparison = df1_common[comparison_columns] != df2_common[comparison_columns]
     mismatch_locs = comparison.stack()
 
-    # Collect mismatch details
-    for (idx, col), is_mismatch in tqdm(mismatch_locs.items(), desc=f"Comparing rows: {file_name}", unit="mismatch", leave=False):
-        val1 = df1_common.at[idx, col]
-        val2 = df2_common.at[idx, col]
-        row1_num = df1_common.at[idx, '_original_row']
-        row2_num = df2_common.at[idx, '_original_row']
-        diff_summary.append({
-            'PrimaryKey': idx,
-            'Column': col,
-            'File1_Value': val1,
-            'File2_Value': val2,
-            'RowNum_File1': row1_num,
-            'RowNum_File2': row2_num,
-            'Status': 'Mismatch'
-        })
-
-    # Final stats
-    total_fields = len(common_idx) * len(common_columns)
-    mismatches = len(diff_summary)
-
-    summary['Total Fields Compared'] = total_fields
-    summary['Number of Discrepancies'] = mismatches
-    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
-    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
-
-
-
------------------
-# Validate primary keys
-if not csv_primary_keys or not all(isinstance(k, str) and k.strip() for k in csv_primary_keys):
-    raise ValueError("❌ 'csv_primary_keys' must be a non-empty list of valid column names")
-
-missing_keys_df1 = [k for k in csv_primary_keys if k not in df1.columns]
-missing_keys_df2 = [k for k in csv_primary_keys if k not in df2.columns]
--=======================================================================
-
-
-import pandas as pd
-from tqdm import tqdm
-
-def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
-    summary = {
-        'Missing Columns in File2': [],
-        'Missing Columns in File1': [],
-        'Missing Rows in File2': 0,
-        'Extra Rows in File2': 0,
-        'Duplicate Rows in File1': 0,
-        'Duplicate Rows in File2': 0,
-        'Total Fields Compared': 0,
-        'Number of Discrepancies': 0,
-        'Failure %': 0.0,
-        'Pass %': 0.0
-    }
-    diff_summary = []
-
-    # Filter by specific columns if provided
-    if csv_columns:
-        df1 = df1[csv_columns]
-        df2 = df2[csv_columns]
-
-    # Check if both DataFrames are already equal
-    if df1.equals(df2):
-        summary['Note'] = '✅ Files are identical — no comparison needed'
-        return pd.DataFrame(), summary
-
-    # Column differences
-    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
-    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
-
-    if not common_columns:
-        return pd.DataFrame(), summary
-
-    # Drop rows with missing primary keys
-    df1 = df1.dropna(subset=csv_primary_keys)
-    df2 = df2.dropna(subset=csv_primary_keys)
-
-    # Add original row numbers for traceability
-    df1['_original_row'] = df1.index + 1
-    df2['_original_row'] = df2.index + 1
-
-    # Set index for join
-    df1.set_index(csv_primary_keys, inplace=True)
-    df2.set_index(csv_primary_keys, inplace=True)
-
-    # Detect and remove duplicate indices
-    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
-    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
-    df1 = df1[~df1.index.duplicated()]
-    df2 = df2[~df2.index.duplicated()]
-
-    # Row presence comparison
-    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
-    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
-
-    # Join common rows
-    common_idx = df1.index.intersection(df2.index)
-    df1_common = df1.loc[common_idx, common_columns + ['_original_row']]
-    df2_common = df2.loc[common_idx, common_columns + ['_original_row']]
-
-    # Vectorized comparison
-    comparison = df1_common[common_columns] != df2_common[common_columns]
-    mismatch_locs = comparison.stack()
-
+    # Create mismatch details
     if not mismatch_locs.empty:
         for (idx, col), is_mismatch in tqdm(mismatch_locs.items(), desc=f"Comparing rows: {file_name}", unit="mismatch", leave=False):
             val1 = df1_common.at[idx, col]
             val2 = df2_common.at[idx, col]
-            row1_num = df1_common.at[idx, '_original_row']
-            row2_num = df2_common.at[idx, '_original_row']
+            row1_num = df1_common.at[idx, '_original_row'] if '_original_row' in df1_common.columns else None
+            row2_num = df2_common.at[idx, '_original_row'] if '_original_row' in df2_common.columns else None
             diff_summary.append({
                 'PrimaryKey': idx,
                 'Column': col,
@@ -633,7 +98,7 @@ def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
                 'Status': 'Mismatch'
             })
 
-    total_fields = len(common_idx) * len(common_columns)
+    total_fields = len(common_idx) * len(comparison_columns)
     mismatches = len(diff_summary)
 
     summary['Total Fields Compared'] = total_fields
@@ -645,123 +110,3 @@ def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
         summary['Note'] = '✅ No comparison issues, files are identical'
 
     return pd.DataFrame(diff_summary), summary
-
-
-if missing_keys_df1 or missing_keys_df2:
-    summary['Note'] = f"❌ Missing primary key(s): {missing_keys_df1 or ''} {missing_keys_df2 or ''}"
-    return pd.DataFrame(), summary
-
-
-------------------------------------------------------------------->>>>>>>>>>>>>>>>\
-import pandas as pd
-from tqdm import tqdm
-
-def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
-    summary = {
-        'Missing Columns in File2': [],
-        'Missing Columns in File1': [],
-        'Missing Rows in File2': 0,
-        'Extra Rows in File2': 0,
-        'Duplicate Rows in File1': 0,
-        'Duplicate Rows in File2': 0,
-        'Total Fields Compared': 0,
-        'Number of Discrepancies': 0,
-        'Failure %': 0.0,
-        'Pass %': 0.0
-    }
-    diff_summary = []
-
-    # Filter by specific columns if provided
-    if csv_columns:
-        df1 = df1[csv_columns]
-        df2 = df2[csv_columns]
-
-    # Check if both DataFrames are already equal
-    if df1.equals(df2):
-        summary['Note'] = '✅ Files are identical — no comparison needed'
-        return pd.DataFrame(), summary
-
-    # Column differences
-    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
-    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
-    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
-
-    if not common_columns:
-        return pd.DataFrame(), summary
-
-    # Drop rows with missing primary keys
-    df1 = df1.dropna(subset=csv_primary_keys)
-    df2 = df2.dropna(subset=csv_primary_keys)
-
-    # Add original row numbers for traceability
-    df1['_original_row'] = df1.index + 1
-    df2['_original_row'] = df2.index + 1
-
-    # Set index for join
-    df1.set_index(csv_primary_keys, inplace=True)
-    df2.set_index(csv_primary_keys, inplace=True)
-
-    # Detect and remove duplicate indices
-    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
-    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
-    df1 = df1[~df1.index.duplicated()]
-    df2 = df2[~df2.index.duplicated()]
-
-    # Row presence comparison
-    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
-    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
-
-    # Join common rows
-    common_idx = df1.index.intersection(df2.index)
-    df1_common = df1.loc[common_idx, common_columns + ['_original_row']]
-    df2_common = df2.loc[common_idx, common_columns + ['_original_row']]
-
-    # Vectorized comparison
-    comparison = df1_common[common_columns] != df2_common[common_columns]
-    mismatch_locs = comparison.stack()
-
-    if not mismatch_locs.empty:
-        for (idx, col), is_mismatch in tqdm(mismatch_locs.items(), desc=f"Comparing rows: {file_name}", unit="mismatch", leave=False):
-            val1 = df1_common.at[idx, col]
-            val2 = df2_common.at[idx, col]
-            row1_num = df1_common.at[idx, '_original_row']
-            row2_num = df2_common.at[idx, '_original_row']
-            diff_summary.append({
-                'PrimaryKey': idx,
-                'Column': col,
-                'File1_Value': val1,
-                'File2_Value': val2,
-                'RowNum_File1': row1_num,
-                'RowNum_File2': row2_num,
-                'Status': 'Mismatch'
-            })
-
-    total_fields = len(common_idx) * len(common_columns)
-    mismatches = len(diff_summary)
-
-    summary['Total Fields Compared'] = total_fields
-    summary['Number of Discrepancies'] = mismatches
-    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
-    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
-
-    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
-        summary['Note'] = '✅ No comparison issues, files are identical'
-
-    return pd.DataFrame(diff_summary), summary
-
-Exception has occurred: KeyError
-"['CUR', 'ORIG Add-On FN', 'Routing Inbound', 'ORIG Add-On RTG', 'DEST Add-On FN', 'FN', 'RTG', 'ORIG Add-On Zone', 'DEST Add-On LOC 2', 'Routing Outbound', 'TRF', 'ORIG Add-On LOC 1', 'DEST Add-On LOC 1', 'Fare Class', 'DEST Add-On Zone', 'ORIG', 'CXR', 'O/R', 'DEST Add-On RTG', 'ORIG Add-On LOC 2', 'DEST', 'ORIG Add-On Fare Class', 'DEST Add-On Fare Class'] not in index"
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 175, in compare_csvs
-    df1_common = df1.loc[common_idx, common_columns + ['_original_row']]
-                 ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 513, in process_pair
-    result = csv_name, *compare_csvs(df1, df2, file1)
-                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 525, in run_comparison
-    results = list(executor.map(process_pair, common_csvs))
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 551, in <module>
-    diff_df, summary, list_files = run_comparison()
-                                   ^^^^^^^^^^^^^^^^
-KeyError: "['CUR', 'ORIG Add-On FN', 'Routing Inbound', 'ORIG Add-On RTG', 'DEST Add-On FN', 'FN', 'RTG', 'ORIG Add-On Zone', 'DEST Add-On LOC 2', 'Routing Outbound', 'TRF', 'ORIG Add-On LOC 1', 'DEST Add-On LOC 1', 'Fare Class', 'DEST Add-On Zone', 'ORIG', 'CXR', 'O/R', 'DEST Add-On RTG', 'ORIG Add-On LOC 2', 'DEST', 'ORIG Add-On Fare Class', 'DEST Add-On Fare Class'] not in index"
-

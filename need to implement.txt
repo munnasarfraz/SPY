@@ -749,5 +749,19 @@ def compare_csvs(df1, df2, file_name, csv_columns=None, csv_primary_keys=None):
 
     return pd.DataFrame(diff_summary), summary
 
-
+Exception has occurred: KeyError
+"['CUR', 'ORIG Add-On FN', 'Routing Inbound', 'ORIG Add-On RTG', 'DEST Add-On FN', 'FN', 'RTG', 'ORIG Add-On Zone', 'DEST Add-On LOC 2', 'Routing Outbound', 'TRF', 'ORIG Add-On LOC 1', 'DEST Add-On LOC 1', 'Fare Class', 'DEST Add-On Zone', 'ORIG', 'CXR', 'O/R', 'DEST Add-On RTG', 'ORIG Add-On LOC 2', 'DEST', 'ORIG Add-On Fare Class', 'DEST Add-On Fare Class'] not in index"
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 175, in compare_csvs
+    df1_common = df1.loc[common_idx, common_columns + ['_original_row']]
+                 ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 513, in process_pair
+    result = csv_name, *compare_csvs(df1, df2, file1)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 525, in run_comparison
+    results = list(executor.map(process_pair, common_csvs))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/development_sarfarz/csv_comparision_v3.py", line 551, in <module>
+    diff_df, summary, list_files = run_comparison()
+                                   ^^^^^^^^^^^^^^^^
+KeyError: "['CUR', 'ORIG Add-On FN', 'Routing Inbound', 'ORIG Add-On RTG', 'DEST Add-On FN', 'FN', 'RTG', 'ORIG Add-On Zone', 'DEST Add-On LOC 2', 'Routing Outbound', 'TRF', 'ORIG Add-On LOC 1', 'DEST Add-On LOC 1', 'Fare Class', 'DEST Add-On Zone', 'ORIG', 'CXR', 'O/R', 'DEST Add-On RTG', 'ORIG Add-On LOC 2', 'DEST', 'ORIG Add-On Fare Class', 'DEST Add-On Fare Class'] not in index"
 

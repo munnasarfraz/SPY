@@ -350,56 +350,80 @@ def run_comparison():
     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
     return final_diff_df, all_summaries
 ===================================++++++++++++++++++++++++++++++++
-Traceback (most recent call last):
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 532, in <module>
-    diff_df, summary, list_files = run_comparison()
-                                   ^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 506, in run_comparison
-    results = list(executor.map(process_pair, common_csvs))
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
-    yield _result_or_cancel(fs.pop())
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
-    return fut.result(timeout)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
-    return self.__get_result()
-           ^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
-    raise self._exception
-  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
-    result = self.fn(*self.args, **self.kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 494, in process_pair
-    result = csv_name, *compare_csvs(df1, df2, file1)
-                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/development_sarfarz/csv_comparision_v2.py", line 163, in compare_csvs
-    df1_common = df1.loc[common_idx, common_columns]
-                 ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1184, in __getitem__
-    return self._getitem_tuple(key)
-           ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1368, in _getitem_tuple
-    return self._getitem_lowerdim(tup)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1041, in _getitem_lowerdim
-    return self._getitem_nested_tuple(tup)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1153, in _getitem_nested_tuple
-    obj = getattr(obj, self.name)._getitem_axis(key, axis=axis)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1420, in _getitem_axis
-    return self._getitem_iterable(key, axis=axis)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1360, in _getitem_iterable
-    keyarr, indexer = self._get_listlike_indexer(key, axis)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexing.py", line 1558, in _get_listlike_indexer
-    keyarr, indexer = ax._get_indexer_strict(key, axis_name)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexes/base.py", line 6200, in _get_indexer_strict
-    self._raise_if_missing(keyarr, indexer, axis_name)
-  File "/home/ubuntu/.local/lib/python3.12/site-packages/pandas/core/indexes/base.py", line 6252, in _raise_if_missing
-    raise KeyError(f"{not_found} not in index")
-KeyError: "['TRF', 'CUR', 'Routing Inbound', 'ORIG Add-On Zone', 'DEST Add-On Fare Class', 'Fare Class', 'ORIG Add-On RTG', 'DEST', 'CXR', 'ORIG Add-On FN', 'DEST Add-On LOC 1', 'DEST Add-On RTG', 'FN', 'ORIG Add-On LOC 2', 'DEST Add-On Zone', 'Routing Outbound', 'ORIG Add-On Fare Class', 'DEST Add-On FN', 'ORIG', 'ORIG Add-On LOC 1', 'RTG', 'DEST Add-On LOC 2', 'O/R'] not in index"
+def compare_csvs(df1, df2, file_name):
+    summary = {
+        'Missing Columns in File2': [],
+        'Missing Columns in File1': [],
+        'Missing Rows in File2': 0,
+        'Extra Rows in File2': 0,
+        'Duplicate Rows in File1': 0,
+        'Duplicate Rows in File2': 0,
+        'Total Fields Compared': 0,
+        'Number of Discrepancies': 0,
+        'Failure %': 0.0,
+        'Pass %': 0.0
+    }
+    diff_summary = []
+
+    if csv_columns:
+        df1 = df1[csv_columns]
+        df2 = df2[csv_columns]
+
+    summary['Missing Columns in File2'] = list(set(df1.columns) - set(df2.columns))
+    summary['Missing Columns in File1'] = list(set(df2.columns) - set(df1.columns))
+    common_columns = list(set(df1.columns).intersection(set(df2.columns)))
+    if not common_columns:
+        return pd.DataFrame(), summary
+
+    df1 = df1.reset_index(drop=True)
+    df2 = df2.reset_index(drop=True)
+    df1['_original_row'] = df1.index + 1
+    df2['_original_row'] = df2.index + 1
+
+    df1 = df1.dropna(subset=csv_primary_keys)
+    df2 = df2.dropna(subset=csv_primary_keys)
+    df1.set_index(csv_primary_keys, inplace=True)
+    df2.set_index(csv_primary_keys, inplace=True)
+
+    summary['Duplicate Rows in File1'] = df1.index.duplicated().sum()
+    summary['Duplicate Rows in File2'] = df2.index.duplicated().sum()
+    df1 = df1[~df1.index.duplicated()]
+    df2 = df2[~df2.index.duplicated()]
+
+    summary['Missing Rows in File2'] = len(df1.index.difference(df2.index))
+    summary['Extra Rows in File2'] = len(df2.index.difference(df1.index))
+
+    common_idx = df1.index.intersection(df2.index)
+    total_fields = 0
+    mismatches = 0
+
+    for idx in tqdm(common_idx, desc=f"Comparing rows: {file_name}", unit="row", leave=False):
+        row1 = df1.loc[idx]
+        row2 = df2.loc[idx]
+        row1_num = row1['_original_row'] if '_original_row' in row1 else None
+        row2_num = row2['_original_row'] if '_original_row' in row2 else None
+        for col in common_columns:
+            val1 = row1[col] if col in row1 else None
+            val2 = row2[col] if col in row2 else None
+            total_fields += 1
+            if pd.isnull(val1) and pd.isnull(val2):
+                continue
+            if val1 != val2:
+                mismatches += 1
+                diff_summary.append({
+                    'PrimaryKey': idx,
+                    'Column': col,
+                    'File1_Value': val1,
+                    'File2_Value': val2,
+                    'RowNum_File1': row1_num,
+                    'RowNum_File2': row2_num,
+                    'Status': 'Mismatch'
+                })
+
+    summary['Total Fields Compared'] = total_fields
+    summary['Number of Discrepancies'] = mismatches
+    summary['Failure %'] = round((mismatches / total_fields) * 100, 2) if total_fields else 0.0
+    summary['Pass %'] = round(100 - summary['Failure %'], 2) if total_fields else 0.0
+    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
+        summary['Note'] = '✅ No comparison issues, files are identical'
+    return pd.DataFrame(diff_summary), summary

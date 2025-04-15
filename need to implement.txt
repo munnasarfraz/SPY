@@ -552,8 +552,4 @@ if missing_keys_df1 or missing_keys_df2:
     summary['Note'] = f"❌ Missing primary key(s): {missing_keys_df1 or ''} {missing_keys_df2 or ''}"
     return pd.DataFrame(), summary
 
-    if mismatches == 0 and summary['Missing Rows in File2'] == 0 and summary['Extra Rows in File2'] == 0:
-        summary['Note'] = '✅ No comparison issues, files are identical'
-
-    return pd.DataFrame(diff_summary), summary
 

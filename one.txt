@@ -1,96 +1,96 @@
-def run_comparison(extract_to_temp=False):
-    source1_zips = list_zip_files(source_1_prefix)
-    source2_zips = list_zip_files(source_2_prefix)
+import pandas as pd
+import zipfile
+import os
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Queue, cpu_count, Process, Manager
+from tqdm import tqdm
+import multiprocessing as mp
+import time
 
-    source1_csv_map = {}
-    source2_csv_map = {}
+SENTINEL = None
+BATCH_SIZE = 4
 
-    build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
-    build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
+# Utility: Chunk list into batches
+def chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 
-    common_csvs = list(set(source1_csv_map) & set(source2_csv_map))
-    missing_in_source2 = set(source1_csv_map) - set(source2_csv_map)
-    missing_in_source1 = set(source2_csv_map) - set(source1_csv_map)
-
-    # Extract if needed
-    if extract_to_temp:
-        print("📦 Extracting ZIPs to disk once...")
-        source1_csv_map = extract_all_zips(source1_csv_map, 'downloads/source1/extract')
-        source2_csv_map = extract_all_zips(source2_csv_map, 'downloads/source2/extract')
-
-    print(f"🔄 Reading and comparing {len(common_csvs)} CSV files in parallel (batch size: {BATCH_SIZE})...")
-
-    queue = mp.Queue(maxsize=cpu_count() * 2)
-    manager = Manager()
-    output_list = manager.list()
-
-    with tqdm(total=len(common_csvs), desc="Overall Progress", ncols=100) as overall_pbar, \
-         tqdm(total=len(common_csvs), desc="Reading Progress", ncols=100) as read_pbar, \
-         tqdm(total=len(common_csvs), desc="Comparing Progress", ncols=100) as compare_pbar:
-
-        processes = []
-        for _ in range(cpu_count()):
-            p = Process(target=compare_worker, args=(queue, output_list, compare_pbar, overall_pbar))
-            p.start()
-            processes.append(p)
-
-        with ThreadPoolExecutor(max_workers=32) as executor:
-            futures = [
-                executor.submit(
-                    reader_batch_thread,
-                    chunk,
-                    source1_csv_map,
-                    source2_csv_map,
-                    queue,
-                    read_pbar,
-                    overall_pbar,
-                    extract=extract_to_temp  # 👈 pass the flag here
-                )
-                for chunk in chunk_list(common_csvs, BATCH_SIZE)
-            ]
-            for f in futures:
-                f.result()
-
-        for _ in range(cpu_count()):
-            queue.put(SENTINEL)
-        for p in processes:
-            p.join()
-
-    # Collect results
-    all_diffs = []
-    all_summaries = {}
-    for csv_name, diff_df, summary in output_list:
-        if not diff_df.empty:
-            diff_df['File'] = csv_name
-            all_diffs.append(diff_df)
-        all_summaries[csv_name] = summary
-
-    if missing_in_source2:
-        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
-    if missing_in_source1:
-        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
-
-    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
-    return final_diff_df, all_summaries, [len(source1_csv_map), len(source2_csv_map)]
-
-
-
-
-
+# Extract all ZIPs to disk once
 def extract_all_zips(zip_map, extract_root_dir):
     extracted_files = {}
     os.makedirs(extract_root_dir, exist_ok=True)
 
+    extracted_zips = set()
     for csv_name, (zip_path, file_name) in zip_map.items():
-        extract_dir = os.path.join(extract_root_dir, os.path.basename(zip_path).replace('.zip', ''))
-        os.makedirs(extract_dir, exist_ok=True)
+        zip_name = os.path.splitext(os.path.basename(zip_path))[0]
+        extract_dir = os.path.join(extract_root_dir, zip_name)
+        extracted_file_path = os.path.join(extract_dir, file_name)
 
-        # Extract only once per ZIP
-        if not os.path.exists(os.path.join(extract_dir, file_name)):
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+        if not os.path.exists(extracted_file_path):
+            if zip_path not in extracted_zips:
+                os.makedirs(extract_dir, exist_ok=True)
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+                extracted_zips.add(zip_path)
 
-        # Save mapping to actual extracted file path
-        extracted_files[csv_name] = os.path.join(extract_dir, file_name)
+        extracted_files[csv_name] = extracted_file_path
 
     return extracted_files
+
+# Thread that reads batches of CSVs and pushes to the queue
+def reader_batch_thread(csv_names, source1_map, source2_map, queue, read_pbar, overall_pbar, extract=False):
+    batch = []
+    for csv_name in csv_names:
+        if extract:
+            file1_path = source1_map[csv_name]
+            file2_path = source2_map[csv_name]
+            df1 = pd.read_csv(file1_path)
+            df2 = pd.read_csv(file2_path)
+        else:
+            zip1, file1 = source1_map[csv_name]
+            zip2, file2 = source2_map[csv_name]
+            df1 = read_csv_from_local_zip(zip1, file1)
+            df2 = read_csv_from_local_zip(zip2, file2)
+
+        batch.append((csv_name, file1, df1, df2))
+        read_pbar.update(1)
+        overall_pbar.update(1)
+    queue.put(batch)
+
+# Compare worker: processes batches
+def compare_worker(queue, output_list, compare_pbar, overall_pbar):
+    while True:
+        batch = queue.get()
+        if batch is SENTINEL:
+            break
+        for csv_name, file1, df1, df2 in batch:
+            start = time.time()
+            print(f"[PID {os.getpid()}] Comparing: {csv_name}")
+            diff_df, summary = compare_csvs(df1, df2, file1)
+            print(f"[PID {os.getpid()}] Done {csv_name} in {time.time() - start:.2f}s")
+            output_list.append((csv_name, diff_df, summary))
+            compare_pbar.update(1)
+            overall_pbar.update(1)
+
+# Placeholder: Define your CSV reading and comparison logic
+def read_csv_from_local_zip(zip_path, file_name):
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        with z.open(file_name) as f:
+            return pd.read_csv(f)
+
+def compare_csvs(df1, df2, file_name):
+    # Dummy implementation for structure
+    diff_df = pd.concat([df1, df2]).drop_duplicates(keep=False)
+    summary = {'rows_in_df1': len(df1), 'rows_in_df2': len(df2), 'diff_rows': len(diff_df)}
+    return diff_df, summary
+
+# Example file listing and map builder
+def list_zip_files(folder):
+    return [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.zip')]
+
+def build_csv_to_zip_map(zip_paths, base_folder, csv_map):
+    for zip_path in zip_paths:
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            for name in z.namelist():
+                if name.endswith('.csv'):
+                    csv_map[name] = (zip_path, name)

@@ -72,3 +72,25 @@ def run_comparison(extract_to_temp=False):
 
     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
     return final_diff_df, all_summaries, [len(source1_csv_map), len(source2_csv_map)]
+
+
+
+
+
+def extract_all_zips(zip_map, extract_root_dir):
+    extracted_files = {}
+    os.makedirs(extract_root_dir, exist_ok=True)
+
+    for csv_name, (zip_path, file_name) in zip_map.items():
+        extract_dir = os.path.join(extract_root_dir, os.path.basename(zip_path).replace('.zip', ''))
+        os.makedirs(extract_dir, exist_ok=True)
+
+        # Extract only once per ZIP
+        if not os.path.exists(os.path.join(extract_dir, file_name)):
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+
+        # Save mapping to actual extracted file path
+        extracted_files[csv_name] = os.path.join(extract_dir, file_name)
+
+    return extracted_files

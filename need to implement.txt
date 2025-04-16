@@ -209,3 +209,104 @@ def run_comparison():
     list_files = [len(source1_csv_map.keys()), len(source2_csv_map.keys())]
     return final_diff_df, all_summaries, list_files
 
+
+----------------------------------------------------------------------
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from multiprocessing import Queue, cpu_count
+from tqdm import tqdm
+import multiprocessing as mp
+
+SENTINEL = None
+
+def reader_thread(csv_name, source1_map, source2_map, queue, progress_bar):
+    zip1, file1 = source1_map[csv_name]
+    zip2, file2 = source2_map[csv_name]
+    df1 = read_csv_from_local_zip(zip1, file1)
+    df2 = read_csv_from_local_zip(zip2, file2)
+    queue.put((csv_name, file1, df1, df2))
+    
+    # Increment the progress bar after reading the file
+    progress_bar.update(1)
+
+def compare_worker(queue, output_list, progress_bar):
+    while True:
+        item = queue.get()
+        if item is SENTINEL:
+            break
+        csv_name, file1, df1, df2 = item
+        diff_df, summary = compare_csvs(df1, df2, file1)
+        output_list.append((csv_name, diff_df, summary))
+        
+        # Increment the progress bar after comparing the file
+        progress_bar.update(1)
+
+def run_comparison():
+    source1_zips = list_zip_files(source_1_prefix)
+    source2_zips = list_zip_files(source_2_prefix)
+
+    source1_csv_map = {}
+    source2_csv_map = {}
+
+    build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
+    build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
+
+    common_csvs = list(set(source1_csv_map.keys()) & set(source2_csv_map.keys()))
+    missing_in_source2 = set(source1_csv_map.keys()) - set(source2_csv_map.keys())
+    missing_in_source1 = set(source2_csv_map.keys()) - set(source1_csv_map.keys())
+
+    all_diffs = []
+    all_summaries = {}
+
+    print(f"🔄 Reading and comparing {len(common_csvs)} CSV files in parallel...")
+
+    # Shared queue and manager list
+    queue = mp.Queue(maxsize=cpu_count() * 4)  # Larger queue size
+    manager = mp.Manager()
+    output_list = manager.list()
+
+    # Progress bar for the overall process (reading + comparing)
+    total_files = len(common_csvs)
+    progress_bar = tqdm(total=total_files * 2, desc="Overall Progress", ncols=100)
+
+    # Start workers (processes)
+    num_workers = 8  # Increase number of workers for CPU-bound tasks (try 8 or 16)
+    processes = []
+    for _ in range(num_workers):
+        p = mp.Process(target=compare_worker, args=(queue, output_list, progress_bar))
+        p.start()
+        processes.append(p)
+
+    # Reading threads (increase max_workers to 64 or higher)
+    with ThreadPoolExecutor(max_workers=64) as executor:  # 64 workers for I/O-bound
+        list(tqdm(executor.map(lambda name: reader_thread(name, source1_csv_map, source2_csv_map, queue, progress_bar), common_csvs), total=len(common_csvs), desc="Reading Files"))
+
+    # Send sentinel to signal end of work
+    for _ in range(num_workers):
+        queue.put(SENTINEL)
+
+    # Wait for all workers to finish
+    for p in processes:
+        p.join()
+
+    # Collect results
+    for csv_name, diff_df, summary in output_list:
+        if not diff_df.empty:
+            diff_df['File'] = csv_name
+            all_diffs.append(diff_df)
+        all_summaries[csv_name] = summary
+
+    if missing_in_source2:
+        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
+    if missing_in_source1:
+        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
+
+    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
+    list_files = [len(source1_csv_map.keys()), len(source2_csv_map.keys())]
+    
+    # Close the progress bar after all work is done
+    progress_bar.close()
+
+    return final_diff_df, all_summaries, list_files
+
+

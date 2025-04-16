@@ -1,31 +1,48 @@
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from multiprocessing import Queue, cpu_count
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Queue, cpu_count, Process, Manager
 from tqdm import tqdm
 import multiprocessing as mp
+import os
+import time
 
 SENTINEL = None
+BATCH_SIZE = 4  # You can tune this
 
-def reader_thread(csv_name, source1_map, source2_map, queue, read_pbar, overall_pbar):
-    zip1, file1 = source1_map[csv_name]
-    zip2, file2 = source2_map[csv_name]
-    df1 = read_csv_from_local_zip(zip1, file1)
-    df2 = read_csv_from_local_zip(zip2, file2)
-    queue.put((csv_name, file1, df1, df2))
-    read_pbar.update(1)  # Update the reading progress bar
-    overall_pbar.update(1)  # Update the overall progress bar
+# Utility: Chunk list into batches
+def chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 
+# Reader: reads a batch of files and puts them in the queue
+def reader_batch_thread(csv_names, source1_map, source2_map, queue, read_pbar, overall_pbar):
+    batch = []
+    for csv_name in csv_names:
+        zip1, file1 = source1_map[csv_name]
+        zip2, file2 = source2_map[csv_name]
+        df1 = read_csv_from_local_zip(zip1, file1)
+        df2 = read_csv_from_local_zip(zip2, file2)
+        batch.append((csv_name, file1, df1, df2))
+        read_pbar.update(1)
+        overall_pbar.update(1)
+    queue.put(batch)
+
+# Compare worker: processes a batch of files
 def compare_worker(queue, output_list, compare_pbar, overall_pbar):
     while True:
-        item = queue.get()
-        if item is SENTINEL:
+        batch = queue.get()
+        if batch is SENTINEL:
             break
-        csv_name, file1, df1, df2 = item
-        diff_df, summary = compare_csvs(df1, df2, file1)
-        output_list.append((csv_name, diff_df, summary))
-        compare_pbar.update(1)  # Update the comparing progress bar
-        overall_pbar.update(1)  # Update the overall progress bar
+        for csv_name, file1, df1, df2 in batch:
+            start = time.time()
+            print(f"[PID {os.getpid()}] Comparing: {csv_name}")
+            diff_df, summary = compare_csvs(df1, df2, file1)
+            print(f"[PID {os.getpid()}] Done {csv_name} in {time.time() - start:.2f}s")
+            output_list.append((csv_name, diff_df, summary))
+            compare_pbar.update(1)
+            overall_pbar.update(1)
 
+# Main function
 def run_comparison():
     source1_zips = list_zip_files(source_1_prefix)
     source2_zips = list_zip_files(source_2_prefix)
@@ -43,37 +60,45 @@ def run_comparison():
     all_diffs = []
     all_summaries = {}
 
-    print(f"🔄 Reading and comparing {len(common_csvs)} CSV files in parallel...")
+    print(f"🔄 Reading and comparing {len(common_csvs)} CSV files in parallel (batch size: {BATCH_SIZE})...")
 
-    # Shared queue and manager list
     queue = mp.Queue(maxsize=cpu_count() * 2)
-    manager = mp.Manager()
+    manager = Manager()
     output_list = manager.list()
 
-    # Progress bars
     with tqdm(total=len(common_csvs), desc="Overall Progress", ncols=100) as overall_pbar, \
          tqdm(total=len(common_csvs), desc="Reading Progress", ncols=100) as read_pbar, \
          tqdm(total=len(common_csvs), desc="Comparing Progress", ncols=100) as compare_pbar:
 
-        # Start workers (processes) for comparison
+        # Start comparison processes
         num_workers = cpu_count()
         processes = []
         for _ in range(num_workers):
-            p = mp.Process(target=compare_worker, args=(queue, output_list, compare_pbar, overall_pbar))
+            p = Process(target=compare_worker, args=(queue, output_list, compare_pbar, overall_pbar))
             p.start()
             processes.append(p)
 
-        # Reading threads with tqdm progress for reading
+        # Start reader threads (with batching)
         with ThreadPoolExecutor(max_workers=32) as executor:
-            futures = [executor.submit(reader_thread, name, source1_csv_map, source2_csv_map, queue, read_pbar, overall_pbar) for name in common_csvs]
+            futures = [
+                executor.submit(
+                    reader_batch_thread,
+                    chunk,
+                    source1_csv_map,
+                    source2_csv_map,
+                    queue,
+                    read_pbar,
+                    overall_pbar
+                )
+                for chunk in chunk_list(common_csvs, BATCH_SIZE)
+            ]
             for future in futures:
-                future.result()  # Ensure all reader threads complete
+                future.result()
 
-        # Send sentinel to signal end of work
+        # Send sentinels to end workers
         for _ in range(num_workers):
             queue.put(SENTINEL)
 
-        # Wait for all comparison processes to finish
         for p in processes:
             p.join()
 

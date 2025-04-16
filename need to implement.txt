@@ -1,66 +1,58 @@
 def run_comparison():
-    import multiprocessing
-    from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+#     source1_zips = list_zip_files(source_1_prefix)
+#     source2_zips = list_zip_files(source_2_prefix)
 
-    source1_zips = list_zip_files(source_1_prefix)
-    source2_zips = list_zip_files(source_2_prefix)
+#     source1_csv_map = {}
+#     source2_csv_map = {}
 
-    source1_csv_map = {}
-    source2_csv_map = {}
+#     build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
+#     build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
 
-    build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
-    build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
+#     common_csvs = set(source1_csv_map.keys()) & set(source2_csv_map.keys())
+#     missing_in_source2 = set(source1_csv_map.keys()) - set(source2_csv_map.keys())
+#     missing_in_source1 = set(source2_csv_map.keys()) - set(source1_csv_map.keys())
 
-    common_csvs = set(source1_csv_map.keys()) & set(source2_csv_map.keys())
-    missing_in_source2 = set(source1_csv_map.keys()) - set(source2_csv_map.keys())
-    missing_in_source1 = set(source2_csv_map.keys()) - set(source1_csv_map.keys())
+#     all_diffs = []
+#     all_summaries = {}
 
-    all_diffs = []
-    all_summaries = {}
+#     # Shared lock for tqdm update
+#     manager = Manager()
+#     counter = manager.Value('i', 0)
+#     lock = manager.Lock()
 
-    # Determine optimal worker count
-    cpu_count = multiprocessing.cpu_count()
-    max_thread_workers = min(64, cpu_count * 4)
-    max_process_workers = min(16, cpu_count)
+#     # Function for threaded progress
+#     def process_pair(csv_name):
+#         zip1, file1 = source1_csv_map[csv_name]
+#         zip2, file2 = source2_csv_map[csv_name]
+#         df1 = read_csv_from_local_zip(zip1, file1)
+#         df2 = read_csv_from_local_zip(zip2, file2)
+#         result = csv_name, *compare_csvs(df1, df2, file1)
 
-    print(f"🔍 Comparing {len(common_csvs)} common CSV files...")
+#         # Thread-safe tqdm update
+#         with lock:
+#             counter.value += 1
+#             pbar.update(1)
+#         return result
 
-    # Step 1: Read all CSV pairs using threads
-    def read_csv_pair(csv_name):
-        try:
-            zip1, file1 = source1_csv_map[csv_name]
-            zip2, file2 = source2_csv_map[csv_name]
-            df1 = read_csv_from_local_zip(zip1, file1)
-            df2 = read_csv_from_local_zip(zip2, file2)
-            return csv_name, df1, df2
-        except Exception as e:
-            logger.error(f"❌ Error reading {csv_name}: {e}")
-            return csv_name, None, None
+#     print(f"🔍 Comparing {len(common_csvs)} common CSV files...")
+#     with tqdm(total=len(common_csvs), desc="Overall Comparison Progress") as pbar:
+#         if use_multithreading_comparision:
+#             with ThreadPoolExecutor(max_workers=64) as executor:
+#                 results = list(executor.map(process_pair, common_csvs))
+#         else:
+#             results = [process_pair(name) for name in common_csvs]
 
-    with ThreadPoolExecutor(max_workers=max_thread_workers) as thread_pool:
-        csv_data = list(tqdm(thread_pool.map(read_csv_pair, common_csvs), total=len(common_csvs), desc="Reading CSVs"))
+#     for csv_name, diff_df, summary in results:
+#         if not diff_df.empty:
+#             diff_df['File'] = csv_name
+#             all_diffs.append(diff_df)
+#         all_summaries[csv_name] = summary
 
-    # Step 2: Compare CSVs using process pool
-    def compare_wrapper(item):
-        csv_name, df1, df2 = item
-        if df1 is None or df2 is None:
-            return csv_name, pd.DataFrame(), {'Note': '❌ Failed to read CSV'}
-        return csv_name, *compare_csvs(df1, df2, csv_name)
+#     if missing_in_source2:
+#         all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
+#     if missing_in_source1:
+#         all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
 
-    with ProcessPoolExecutor(max_workers=max_process_workers) as process_pool:
-        results = list(tqdm(process_pool.map(compare_wrapper, csv_data), total=len(csv_data), desc="Comparing CSVs"))
-
-    for csv_name, diff_df, summary in results:
-        if not diff_df.empty:
-            diff_df['File'] = csv_name
-            all_diffs.append(diff_df)
-        all_summaries[csv_name] = summary
-
-    if missing_in_source2:
-        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
-    if missing_in_source1:
-        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
-
-    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
-    list_files = [len(source1_csv_map.keys()), len(source2_csv_map.keys())]
-    return final_diff_df, all_summaries, list_files
+#     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
+#     list_files = [len(source1_csv_map.keys()), len(source2_csv_map.keys())]
+#     return final_diff_df, all_summaries, list_files

@@ -56,3 +56,71 @@ def run_comparison():
 #     final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
 #     list_files = [len(source1_csv_map.keys()), len(source2_csv_map.keys())]
 #     return final_diff_df, all_summaries, list_files
+
+
+
+
+------------------------------
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from tqdm import tqdm
+import multiprocessing as mp
+
+# Define outside so it's pickleable
+def read_pair(csv_name, source1_map, source2_map):
+    zip1, file1 = source1_map[csv_name]
+    zip2, file2 = source2_map[csv_name]
+    df1 = read_csv_from_local_zip(zip1, file1)
+    df2 = read_csv_from_local_zip(zip2, file2)
+    return (csv_name, file1, df1, df2)
+
+def compare_pair(args):
+    csv_name, file1, df1, df2 = args
+    return csv_name, *compare_csvs(df1, df2, file1)
+
+def run_comparison():
+    source1_zips = list_zip_files(source_1_prefix)
+    source2_zips = list_zip_files(source_2_prefix)
+
+    source1_csv_map = {}
+    source2_csv_map = {}
+
+    build_csv_to_zip_map(source1_zips, 'downloads/source1', source1_csv_map)
+    build_csv_to_zip_map(source2_zips, 'downloads/source2', source2_csv_map)
+
+    common_csvs = set(source1_csv_map.keys()) & set(source2_csv_map.keys())
+    missing_in_source2 = set(source1_csv_map.keys()) - set(source2_csv_map.keys())
+    missing_in_source1 = set(source2_csv_map.keys()) - set(source1_csv_map.keys())
+
+    all_diffs = []
+    all_summaries = {}
+
+    print(f"🔍 Reading and comparing {len(common_csvs)} CSV files...")
+
+    # Phase 1: Read using threads
+    read_results = []
+    with ThreadPoolExecutor(max_workers=32) as reader_pool:
+        futures = [reader_pool.submit(read_pair, name, source1_csv_map, source2_csv_map) for name in common_csvs]
+        for f in tqdm(as_completed(futures), total=len(futures), desc="Reading CSVs"):
+            read_results.append(f.result())
+
+    # Phase 2: Compare using processes
+    with ProcessPoolExecutor(max_workers=mp.cpu_count()) as compare_pool:
+        compare_futures = [compare_pool.submit(compare_pair, args) for args in read_results]
+        for f in tqdm(as_completed(compare_futures), total=len(compare_futures), desc="Comparing CSVs"):
+            csv_name, diff_df, summary = f.result()
+            if not diff_df.empty:
+                diff_df['File'] = csv_name
+                all_diffs.append(diff_df)
+            all_summaries[csv_name] = summary
+
+    # Add missing file info
+    if missing_in_source2:
+        all_summaries["Missing CSVs in Source2"] = list(missing_in_source2)
+    if missing_in_source1:
+        all_summaries["Extra CSVs in Source2"] = list(missing_in_source1)
+
+    final_diff_df = pd.concat(all_diffs) if all_diffs else pd.DataFrame()
+    list_files = [len(source1_csv_map.keys()), len(source2_csv_map.keys())]
+    return final_diff_df, all_summaries, list_files
+

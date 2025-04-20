@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>ATPCO Report</title>
+        <link rel="icon" type="image/x-icon" href="https://d3i59dyun0two3.cloudfront.net/wp-content/uploads/media/2024/11/29164438/ATPCO_logo_white.png">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+        <style>
+            body { font-family: Arial, sans-serif; background: #f4f4f9; margin: 0; padding: 0; }
+            .container { background: white; margin: 10px auto; padding: 10px; max-width: 98%; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            header { background-color: #173E72; color: white; padding: 5px; text-align: center; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; word-break: break-word; table-layout: fixed; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background: #173E72; color: white; position: sticky; top: 0; }
+            tr:nth-child(even) { background: #f9f9f9; }
+            tr:hover { background: #f1f1f1; }
+            .toggle-button { font-size: 0.8em; padding: 3px 8px; background-color: #0056b3; color: white; border: none; border-radius: 4px; cursor: pointer; }
+            .summary-badge { font-weight: bold; }
+            .diff-table th { background: #173E72; }
+            .summary-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 10px;
+                margin-top: 15px;
+            }
+            .summary-item {
+                background: #f8f9fa;
+                padding: 8px;
+                border-radius: 4px;
+                border-left: 4px solid #173E72;
+            }
+            .summary-label {
+                font-weight: bold;
+                color: #495057;
+            }
+            .summary-value {
+                color: #212529;
+                margin-left: 5px;
+            }
+            .numeric-diff {
+                font-family: monospace;
+                text-align: right;
+            }
+            .positive-diff { color: #d9534f; }
+            .negative-diff { color: #5cb85c; }
+            header img {
+                height: 60px;
+                width: auto;
+                max-width: 200px;
+            }
+            .metrics-container {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 20px 0;
+            }
+            .metric-card {
+                background: white;
+                border-radius: 8px;
+                padding: 15px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                text-align: center;
+            }
+            .metric-value {
+                font-size: 24px;
+                font-weight: bold;
+                margin: 5px 0;
+            }
+            .metric-label {
+                color: #6c757d;
+                font-size: 14px;
+            }
+            .metric-subtext {
+                font-size: 12px;
+                color: #6c757d;
+                margin-top: 5px;
+            }
+            .smaller-text {
+                font-size: 0.9em;
+            }
+            .pass-metric { border-top: 4px solid #28a745; }
+            .fail-metric { border-top: 4px solid #dc3545; }
+            .warn-metric { border-top: 4px solid #ffc107; }
+            .neutral-metric { border-top: 4px solid #66b2ff; }
+            
+        </style>
+        <script>
+            function toggleVisibility(id, btn) {
+                var el = document.getElementById(id);
+                if (el.style.display === 'none') {
+                    el.style.display = 'block';
+                    btn.innerHTML = '-';
+                } else {
+                    el.style.display = 'none';
+                    btn.innerHTML = '+';
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <header>
+        <table style="border: none; width: 100%;">
+            <tr>
+                <td style="border: none; text-align: left; width: 20%; padding: 5px 0;">
+                    <img src="https://d3i59dyun0two3.cloudfront.net/wp-content/uploads/media/2024/11/29164438/ATPCO_logo_white.png" alt="ATPCO" style="height: 40px; width: auto;">
+                </td>
+                <td style="border: none; text-align: center; padding: 5px 0;">
+                    <h1 style="margin: 0; font-size: 1.5em;">ATPCO - CSV Comparison Report</h1>
+                    <p style="margin: 2px 0 0; font-size: 0.9em;"> <strong>Generated:</strong> 2025-04-20 16:54:16 | <strong>Duration:</strong> 0:01:03</p>
+                </td>
+                <td style="border: none; text-align: right; width: 20%; padding: 5px 0;">
+                    <div style="font-size: 1.2em; font-weight: bold; color: #dc3545">
+                        99.99951% Pass
+                    </div>
+                </td>
+            </tr>
+        </table>
+    </header>
+    <div class="container">
+        <h2>📊 Key Metrics</h2>
+        <div class="metrics-container">
+            <div class="metric-card pass-metric">
+                <div class="metric-value">99.99951%</div>
+                <div class="metric-label">Overall Pass Rate</div>
+            </div>
+            <div class="metric-card fail-metric">
+                <div class="metric-value">14</div>
+                <div class="metric-label">Total Discrepancies</div>
+            </div>
+            <div class="metric-card neutral-metric">
+                <div class="metric-value">2864283</div>
+                <div class="metric-label">Total Fields Compared</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">11</div>
+                <div class="metric-label">Missing Rows</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">0</div>
+                <div class="metric-label">Extra Rows</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">2</div>
+                <div class="metric-label">Duplicate Rows</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">1</div>
+                <div class="metric-label">Field Discrepancies</div>
+            </div>
+        </div>
+
+        <h2>📈 Column-Specific Metrics</h2><div class='metrics-container'>
+            <div class="metric-card pass-metric">
+                <div class="metric-value">100.0%</div>
+                <div class="metric-label">'Fare AMT' Pass Rate</div>
+                <div class="metric-subtext">
+                    0 of 0 mismatches
+                </div>
+            </div>
+            
+            <div class="metric-card pass-metric">
+                <div class="metric-value">100.0%</div>
+                <div class="metric-label">'Difference' Pass Rate</div>
+                <div class="metric-subtext">
+                    0 of 0 mismatches
+                </div>
+            </div>
+            
+            <div class="metric-card pass-metric">
+                <div class="metric-value">100.0%</div>
+                <div class="metric-label">'Fare + CIF AMT' Pass Rate</div>
+                <div class="metric-subtext">
+                    0 of 0 mismatches
+                </div>
+            </div>
+            </div>
+
+        <h2>🔍 Comparison Details</h2>
+        <ul>
+            <li><strong><i class="fas fa-file-alt"></i> Files in Engine:</strong> 5</li>
+            <li><strong><i class="fas fa-file-alt"></i> Files in Neoprice:</strong> 9</li>
+            <li>
+                <strong><i class="fas fa-key"></i> Primary Keys:</strong> 
+                <button class="toggle-button" onclick="toggleVisibility('primaryKeys', this)">+</button>
+                <span id="primaryKeys" style="display:none;">
+                    <span class="smaller-text">CXR, ORIG, DEST, Fare Class, O/R, TRF, RTG, FN, CUR, Routing Outbound, Routing Inbound, ORIG Add-On LOC 1, ORIG Add-On LOC 2, ORIG Add-On Fare Class, ORIG Add-On FN, ORIG Add-On RTG, ORIG Add-On Zone, DEST Add-On LOC 1, DEST Add-On LOC 2, DEST Add-On Fare Class, DEST Add-On FN, DEST Add-On RTG, DEST Add-On Zone</span>
+                </span>
+            </li>
+            <li>
+                <strong><i class="fas fa-columns"></i> Compared Columns:</strong>
+                <button class="toggle-button" onclick="toggleVisibility('comparedColumns', this)">+</button>
+                <span id="comparedColumns" style="display:none;">
+                    <span class="smaller-text">CXR, ORIG, DEST, Fare Class, O/R, TRF, RTG, FN, CUR, Fare AMT, Difference, Fare + CIF AMT, OW AMT, RT AMT, Market, PDT, FTC, CIF AMT, Routing Outbound, Routing Inbound, Tax AMT, Total Price AMT, AP, MIN Stay, MAX Stay, First TVL, Last TVL, Return TVL, First Sale, Last Sale, NR, Vol Refunds, Change Permitted, Vol Change, Seasonality Start, Seasonality End, PTC, Rule, Nonstop, Direct, From/To/Via Airport ORIG, From/To/Via Airport DEST, GI, RBD, C, ACCT, EFF DT, DSC DT, FBR BFC, FBR C, GFS FAN, GFS Date, SUBS Date, SUBS Time, Origin Country, Destination Country, A, Surcharge, Cabin, Seasonality Outbound, Seasonality Inbound, Blackout Outbound, Blackout Inbound, Day Type, Season, FS, FarebuilderIndicator, BatchId, Batch Comments, Sales Restrictions, Travel Restrictions, Sellable Status, YQ AMT, YR AMT, ORIG Add-On LOC 1, ORIG Add-On LOC 2, ORIG Add-On Fare Class, ORIG Add-On Fare AMT, ORIG Add-On CUR, ORIG Add-On FN, ORIG Add-On RTG, ORIG Add-On Zone, SPEC ORIG, SPEC DEST, SPEC AMT, SPEC CUR, DEST Add-On LOC 1, DEST Add-On LOC 2, DEST Add-On Fare Class, DEST Add-On Fare AMT, DEST Add-On CUR, DEST Add-On FN, DEST Add-On RTG, DEST Add-On Zone, Outbound Travel Date, Inbound Travel Date, Outbound Day of Week, Inbound Day of Week, Outbound Time of Day, Inbound Time of Day, Rule Title, 6H AMT, 6I AMT, 6J AMT, 6K AMT, First RES, Last RES</span>
+                </span>
+            </li>
+        </ul>
+
+        <h2>📝 File Comparison Results</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th width="20%" nowrap>CSV File</th>
+                    <th width="5%">Status</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+        <tr>
+            <td><i class="fas fa-file-csv" style="color:blue;"></i> FS_MEX_SGN_CK__international.csv</td>
+            <td align="center"><i class='fas fa-check-circle' style='color:green;'></i></td>
+            <td>
+                <div style="color: green;">
+                    <i class="fas fa-check-circle"></i> The files are identical. No differences were found during the comparison.
+                </div>
+            </td>
+        </tr>
+        
+        <tr>
+            <td><i class="fas fa-file-csv" style="color:blue;"></i> FS_MEX_SGN_AK__international.csv</td>
+            <td align="center"><i class='fas fa-times-circle' style='color: red;'></i></td>
+            <td>
+                <div>
+                    <button class="toggle-button" onclick="toggleVisibility('diff-FS_MEX_SGN_AK__international.csv', this)">+</button>
+                    <span class="summary-badge" style="background-color: #f8d7da; color: #721c24; padding: 2px 6px; border-radius: 4px; margin-left: 5px;">
+                        13 discrepancies
+                        | 0.001784% failure
+                    </span>
+                    <div id="diff-FS_MEX_SGN_AK__international.csv" style="display:none; margin-top: 10px;">
+                        <table class="diff-table">
+                            <thead>
+                                <tr>
+                                    <th width="50%">Primary Key</th>
+                                    <th width="10%">Column</th>
+                                    <th width="10%">Engine</th>
+                                    <th width="10%">Neoprice</th>
+                                    <th width="10%">Diff</th>
+                                    <th width="10%">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;BLSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;CHI&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6721.0&#x27;, &#x27;780.0&#x27;, &#x27;KUL&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6446.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6636, 6637 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>DUPLICATE_ROW</small></td>
+                <td><small>Duplicate (2 occurrences)</small></td>
+                <td><small></small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Duplicate in Engine</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;RLOWFUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;SFO&#x27;, &#x27;MEX&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6735.0&#x27;, &#x27;780.0&#x27;, &#x27;HAN&#x27;, &#x27;SGN&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6452.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6696, 6697 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>DUPLICATE_ROW</small></td>
+                <td><small>Duplicate (2 occurrences)</small></td>
+                <td><small></small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Duplicate in Engine</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;EKPOFUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;MCO&#x27;, &#x27;MEX&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6743.0&#x27;, &#x27;780.0&#x27;, &#x27;SIN&#x27;, &#x27;SGN&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6448.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6687 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;FOOWFMX1&#x27;, &#x27;3&#x27;, &#x27;29&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;HKG&#x27;, &#x27;SGN&#x27;, &#x27;A*****&#x27;, &#x27;nan&#x27;, &#x27;6435.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6681 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;KHSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;CHI&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6721.0&#x27;, &#x27;780.0&#x27;, &#x27;KUL&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6446.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6689 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;KHSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;HOU&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6762.0&#x27;, &#x27;780.0&#x27;, &#x27;CAN&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6431.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6686 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;KHSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;SFO&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6735.0&#x27;, &#x27;780.0&#x27;, &#x27;SIN&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6448.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6688 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;MKSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;SFO&#x27;, &#x27;MEX&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6735.0&#x27;, &#x27;780.0&#x27;, &#x27;PNH&#x27;, &#x27;SGN&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6440.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6685 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;UHSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;HOU&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6734.0&#x27;, &#x27;780.0&#x27;, &#x27;KUL&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6446.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6690 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;UKSOSUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;CHI&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6721.0&#x27;, &#x27;780.0&#x27;, &#x27;CAN&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6431.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6682 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;XHOWFCA1&#x27;, &#x27;3&#x27;, &#x27;101&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;CAD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;YTO&#x27;, &#x27;MEX&#x27;, &#x27;V*****&#x27;, &#x27;5.0&#x27;, &#x27;6760.0&#x27;, &#x27;780.0&#x27;, &#x27;BKK&#x27;, &#x27;SGN&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6449.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6684 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;YKOWFCA1&#x27;, &#x27;3&#x27;, &#x27;101&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;CAD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;YTO&#x27;, &#x27;MEX&#x27;, &#x27;V*****&#x27;, &#x27;5.0&#x27;, &#x27;6760.0&#x27;, &#x27;780.0&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;, &#x27;nan&#x27;)</small><br>
+                    <small>Engine Row: 6691 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;YKOWFUS1&#x27;, &#x27;3&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;nan&#x27;, &#x27;MCO&#x27;, &#x27;MEX&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6743.0&#x27;, &#x27;780.0&#x27;, &#x27;JKT&#x27;, &#x27;SGN&#x27;, &#x27;V*****&#x27;, &#x27;nan&#x27;, &#x27;6437.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 6683 Neoprice Row: -</small>
+                </td>
+            
+                <td><small>MISSING_ROW</small></td>
+                <td><small>Exists</small></td>
+                <td><small>Missing</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Missing in Neoprice</small></td>
+            </tr>
+            
+                            </tbody>
+                        </table>
+                        <br>
+                        <div class="summary-grid">
+                            <div class="summary-item">
+                                <span class="summary-label">Missing Columns in Engine:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Missing Columns in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Missing Rows in Neoprice:</span>
+                                <span class="summary-value">11</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Extra Rows in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Duplicates in Engine:</span>
+                                <span class="summary-value">2</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Duplicates in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </td>
+        </tr>
+        
+        <tr>
+            <td><i class="fas fa-file-csv" style="color:blue;"></i> FS_MEX_SGN_BK__international.csv</td>
+            <td align="center"><i class='fas fa-times-circle' style='color: red;'></i></td>
+            <td>
+                <div>
+                    <button class="toggle-button" onclick="toggleVisibility('diff-FS_MEX_SGN_BK__international.csv', this)">+</button>
+                    <span class="summary-badge" style="background-color: #f8d7da; color: #721c24; padding: 2px 6px; border-radius: 4px; margin-left: 5px;">
+                        1 discrepancies
+                        | 0.000137% failure
+                    </span>
+                    <div id="diff-FS_MEX_SGN_BK__international.csv" style="display:none; margin-top: 10px;">
+                        <table class="diff-table">
+                            <thead>
+                                <tr>
+                                    <th width="50%">Primary Key</th>
+                                    <th width="10%">Column</th>
+                                    <th width="10%">Engine</th>
+                                    <th width="10%">Neoprice</th>
+                                    <th width="10%">Diff</th>
+                                    <th width="10%">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                
+            <tr>
+                <td rowspan="1" style="vertical-align: top;">
+                    <small>(&#x27;EK&#x27;, &#x27;MEX&#x27;, &#x27;SGN&#x27;, &#x27;BKEESUS1&#x27;, &#x27;2&#x27;, &#x27;1&#x27;, &#x27;7200&#x27;, &#x27;&#x27;, &#x27;USD&#x27;, &#x27;MEX-BCN-DXB-SGN&#x27;, &#x27;SGN-DXB-BCN-MEX&#x27;, &#x27;CHI&#x27;, &#x27;MEX&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6733.0&#x27;, &#x27;780.0&#x27;, &#x27;BKK&#x27;, &#x27;SGN&#x27;, &#x27;I*****&#x27;, &#x27;nan&#x27;, &#x27;6449.0&#x27;, &#x27;750.0&#x27;)</small><br>
+                    <small>Engine Row: 12 Neoprice Row: 12</small>
+                </td>
+            
+                <td><small>Rule Title</small></td>
+                <td><small>STRATEGIC FARES EX-US\nXNOTE</small></td>
+                <td><small>STRATEGIC FARES EX-US\nNOTE</small></td>
+                <td class="numeric-diff "><small>N/A</small></td>
+                <td rowspan="1" style="vertical-align: middle;"><small>Mismatch</small></td>
+            </tr>
+            
+                            </tbody>
+                        </table>
+                        <br>
+                        <div class="summary-grid">
+                            <div class="summary-item">
+                                <span class="summary-label">Missing Columns in Engine:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Missing Columns in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Missing Rows in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Extra Rows in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Duplicates in Engine:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                            <div class="summary-item">
+                                <span class="summary-label">Duplicates in Neoprice:</span>
+                                <span class="summary-value">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </td>
+        </tr>
+        
+        <tr>
+            <td><i class="fas fa-file-csv" style="color:blue;"></i> FS_MEX_SGN_EK__international.csv</td>
+            <td align="center"><i class='fas fa-check-circle' style='color:green;'></i></td>
+            <td>
+                <div style="color: green;">
+                    <i class="fas fa-check-circle"></i> The files are identical. No differences were found during the comparison.
+                </div>
+            </td>
+        </tr>
+        
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> FS_MEX_SGN_FA__international.csv</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:orange;"></i></td>
+                <td><strong>Missing in Neoprice</strong></td>
+            </tr>
+            
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> FS_MEX_SGN_DK__international - Copy.csv</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:blue;"></i></td>
+                <td><strong>Extra in Neoprice</strong></td>
+            </tr>
+            
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> FS_MEX_SGN_CK__international - Copy.csv</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:blue;"></i></td>
+                <td><strong>Extra in Neoprice</strong></td>
+            </tr>
+            
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> FS_MEX_SGN_BK__international - Copy.csv</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:blue;"></i></td>
+                <td><strong>Extra in Neoprice</strong></td>
+            </tr>
+            
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> FS_MEX_SGN_FK__international.csv</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:blue;"></i></td>
+                <td><strong>Extra in Neoprice</strong></td>
+            </tr>
+            
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> FS_MEX_SGN_DK__international.csv</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:blue;"></i></td>
+                <td><strong>Extra in Neoprice</strong></td>
+            </tr>
+            
+            </tbody>
+        </table>
+    </div>
+    </body>
+    </html>
+    

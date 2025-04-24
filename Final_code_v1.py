@@ -171,7 +171,8 @@ def read_zip_from_s3(zip_key):
     zip_obj = s3.get_object(Bucket=bucket_name, Key=zip_key)
     zip_data = zipfile.ZipFile(io.BytesIO(zip_obj['Body'].read()))
     csv_files = {}
-    for filename in zip_data.namelist():
+    #for filename in zip_data.namelist():
+    for filename in tqdm(zip_data.namelist(), desc="Processing Zip", unit="file", leave=True):
         if filename.endswith('.csv'):
             with zip_data.open(filename) as f:
                 df = pd.read_csv(f, low_memory=False)
@@ -357,7 +358,7 @@ def compare_csvs(df1, df2, file_name):
     mismatches = 0
     discrepant_rows = set()  # Track rows with discrepancies
 
-    for idx in tqdm(common_idx, desc=f"Comparing rows ({file_name})", unit="rows", file=sys.stdout, dynamic_ncols=True):
+    for idx in tqdm(common_idx, desc=f"Comparing rows ({file_name})", unit="rows", dynamic_ncols=True, leave=True):
         if isinstance(df1.index, pd.MultiIndex):
             row1 = df1.loc[tuple(idx)] if isinstance(idx, (list, tuple)) else df1.loc[idx]
             row2 = df2.loc[tuple(idx)] if isinstance(idx, (list, tuple)) else df2.loc[idx]
@@ -638,7 +639,7 @@ def generate_html_report(
 
         # Build difference table with tqdm
         diff_table_rows = []
-        for (primary_key, status), group in tqdm(diff_groups.items(), desc=f"Building diff table for {csv_file}", leave=False):
+        for (primary_key, status), group in tqdm(diff_groups.items(), desc=f"calculating diffrences for  {csv_file}", unit="file", leave=True):
             rowspan = len(group['details'])
             cl_primary_key = tuple(x if x != 'nan' else '' for x in primary_key)
             
@@ -740,7 +741,7 @@ def generate_html_report(
                 executor.submit(process_file, csv_file, file_summary)
                 for csv_file, file_summary in summary.items()
             ]
-            for future in tqdm(futures, desc="Processing files (multithreaded)"):
+            for future in tqdm(futures, desc="Generating Report"):
                 result = future.result()
                 if result:
                     comparison_row, local_metrics = result
@@ -751,7 +752,7 @@ def generate_html_report(
                         global_percentage_metrics[col]['total'] += metrics['total']
                         global_percentage_metrics[col]['mismatches'] += metrics['mismatches']
     else:
-        for csv_file, file_summary in tqdm(summary.items(), desc="Processing files"):
+        for csv_file, file_summary in tqdm(summary.items(), desc="Generating Report"):
             result = process_file(csv_file, file_summary)
             if result:
                 comparison_row, local_metrics = result
@@ -1017,8 +1018,8 @@ def run_comparison(download_local=True):
     source2_zips = list_zip_files(source_2_prefix, download_local)
 
     # For testing: limit to first file
-    # source1_zips = [source1_zips[0]]
-    # source2_zips = [source2_zips[0]]
+    source1_zips = [source1_zips[0]]
+    source2_zips = [source2_zips[0]]
 
     all_csvs_source1 = read_all_csvs_by_source(source1_zips, "source1", download_local, use_multithreading_reading)
     all_csvs_source2 = read_all_csvs_by_source(source2_zips, "source2", download_local, use_multithreading_reading)
@@ -1056,7 +1057,6 @@ if __name__ == "__main__":
         include_missing_files=include_missing_files,
         include_extra_files=include_extra_files,
         global_percentage=global_percentage,
-        use_multithreading = False
+        use_multithreading = True
     )
-    webbrowser.open(output_file)
     logging.info('---------------- CSV Comparison Finished ----------------')

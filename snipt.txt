@@ -1,0 +1,495 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import html
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from functools import lru_cache
+import os
+from io import StringIO
+import logging
+
+def generate_html_report(
+    diff_df,
+    summary,
+    report_start_time,
+    output_file,
+    source_files_count,
+    destination_files_count,
+    primary_key_columns=None,
+    columns=None,
+    project_name="Project",
+    project_logo="logo.png",
+    include_passed=True,
+    include_missing_files=True,
+    include_extra_files=True,
+    global_percentage=None,
+    use_multithreading=True
+):
+    report_end_time = datetime.now()
+    time_taken = report_end_time - report_start_time
+    time_taken_str = str(time_taken).split('.')[0]
+
+    # Precompute filtered DataFrames
+    file_diff_dfs = {
+        csv_file: diff_df[diff_df['File'] == csv_file]
+        for csv_file in summary
+        if csv_file not in ["Missing in Source2", "Extra in Source2"]
+    }
+
+    # Initialize metrics
+    metrics_lock = Lock()
+    global_percentage_metrics = {
+        col: {'total': 0, 'mismatches': 0, 'pass_percent': 100.0, 'fail_percent': 0.0}
+        for col in global_percentage or []
+    }
+
+    @lru_cache(maxsize=1000)
+    def format_value(val):
+        if pd.isna(val) or val is None or val == np.nan:
+            return ""
+        if isinstance(val, (int, float)):
+            if float(val).is_integer():
+                return str(int(val))
+            return "{:.4f}".format(val).rstrip('0').rstrip('.')
+        return str(val)
+
+    def calculate_diff(val1, val2):
+        try:
+            num1, num2 = np.array([val1, val2], dtype=np.float64)
+            diff = num1 - num2
+            if np.abs(diff) < 1e-10:
+                return "0"
+            return "{:.4f}".format(diff).rstrip('0').rstrip('.')
+        except (ValueError, TypeError):
+            return "N/A"
+
+    # Validate required columns
+    required_columns = ['PrimaryKey', 'Status', 'RowNum_Engine', 'RowNum_Neoprice',
+                       'Engine_Value', 'Neoprice_Value', 'Column']
+    missing_cols = [col for col in required_columns if col not in diff_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns in diff_df: {missing_cols}")
+
+    def process_file(csv_file, file_summary):
+        if csv_file in ["Missing in Source2", "Extra in Source2"] or not isinstance(file_summary, dict):
+            return None, {}, 0, 0, 0, 0, 0, 0, 0
+        match_status = file_summary.get('Status', 'PASS')
+        if match_status == "PASS" and not include_passed:
+            return None, {}, 0, 0, 0, 0, 0, 0, 0
+
+        # Calculate metrics
+        row_discrepancies = file_summary.get('Number of Row Discrepancies', 0)
+        engine_rows = file_summary.get('Total Rows in Engine', 0)
+        neoprice_rows = file_summary.get('Total Rows in Neoprice', 0)
+        fields = file_summary.get('Total Fields Compared', 0)
+        duplicates = file_summary.get('Duplicate Rows in Engine', 0) + file_summary.get('Duplicate Rows in Neoprice', 0)
+        missing_rows = file_summary.get('Missing Rows in Neoprice', 0)
+        extra_rows = file_summary.get('Extra Rows in Neoprice', 0)
+
+        file_diff_df = file_diff_dfs.get(csv_file, pd.DataFrame())
+        icon = "<i class='fas fa-check-circle' style='color:green;'></i>" if match_status == "PASS" else "<i class='fas fa-times-circle' style='color: red;'></i>"
+
+        # Global percentage calculations
+        local_metrics = {col: {'mismatches': 0, 'total': 0} for col in global_percentage or []}
+        if global_percentage and not file_diff_df.empty:
+            logging.info(f"Processing file: {csv_file}, diff_df rows: {len(file_diff_df)}")
+            for col in global_percentage:
+                col_mismatches = file_diff_df[(file_diff_df['Column'] == col) & 
+                                             (file_diff_df['Status'] == 'Mismatch')].shape[0]
+                total_comparisons = file_diff_df[file_diff_df['Column'] == col].shape[0]
+                local_metrics[col]['mismatches'] = col_mismatches
+                local_metrics[col]['total'] = total_comparisons
+
+        # Group discrepancies
+        diff_groups = {}
+        if not file_diff_df.empty:
+            for _, row in file_diff_df.iterrows():
+                key = (row['PrimaryKey'], row['Status'])
+                if key not in diff_groups:
+                    diff_groups[key] = {
+                        'RowNum_Engine': row['RowNum_Engine'],
+                        'RowNum_Neoprice': row['RowNum_Neoprice'],
+                        'details': []
+                    }
+                diff_groups[key]['details'].append(row)
+
+        # Build difference table
+        diff_table_rows = [
+            f"""
+            <tr>
+                <td rowspan="{len(group['details'])}" style="vertical-align: top;">
+                    <small>{html.escape(str(tuple(x if x != 'nan' else '' for x in primary_key)))}</small><br>
+                    <small>Engine Row: {group['RowNum_Engine'] or '-'} Neoprice Row: {group['RowNum_Neoprice'] or '-'}</small>
+                </td>
+                <td><small>{html.escape(str(first_detail['Column']))}</small></td>
+                <td><small>{html.escape(format_value(first_detail['Engine_Value']))}</small></td>
+                <td><small>{html.escape(format_value(first_detail['Neoprice_Value']))}</small></td>
+                <td class="numeric-diff {diff_class}"><small>{diff_value}</small></td>
+                <td rowspan="{len(group['details'])}" style="vertical-align: middle;"><small>{status}</small></td>
+            </tr>
+            """
+            for (primary_key, status), group in diff_groups.items()
+            for first_detail in [group['details'][0]]
+            for diff_value in [calculate_diff(first_detail['Engine_Value'], first_detail['Neoprice_Value'])]
+            for diff_class in ["positive-diff" if diff_value != "N/A" and float(diff_value) > 0 else "negative-diff" if diff_value != "N/A" and float(diff_value) < 0 else ""]
+        ] + [
+            f"""
+            <tr>
+                <td><small>{html.escape(str(detail['Column']))}</small></td>
+                <td><small>{html.escape(format_value(detail['Engine_Value']))}</small></td>
+                <td><small>{html.escape(format_value(detail['Neoprice_Value']))}</small></td>
+                <td class="numeric-diff {diff_class}">{diff_value}</td>
+            </tr>
+            """
+            for (primary_key, status), group in diff_groups.items()
+            for detail in group['details'][1:]
+            for diff_value in [calculate_diff(detail['Engine_Value'], detail['Neoprice_Value'])]
+            for diff_class in ["positive-diff" if diff_value != "N/A" and float(diff_value) > 0 else "negative-diff" if diff_value != "N/A" and float(diff_value) < 0 else ""]
+        ]
+        diff_table = "".join(diff_table_rows)
+
+        # Build mismatch details
+        xrow_disc = row_discrepancies - (missing_rows + extra_rows + duplicates)
+        mismatch_details = (
+            f"""
+            <div>
+                <button class="toggle-button" onclick="toggleVisibility('diff-{csv_file}', this)">+</button>
+                <span class="summary-badge" style="background-color: #f8d7da; color: #721c24; padding: 2px 6px; border-radius: 4px; margin-left: 5px;">
+                    {row_discrepancies} discrepancies
+                    {f"| {file_summary.get('Row Failure %', 0.0):.6f}% failure" if file_summary.get('Number of Discrepancies', 0) > 0 else ""}
+                    {f"| row discrepancies:{xrow_disc}" if xrow_disc > 0 else ""}
+                    {f"| missing rows:{missing_rows}" if missing_rows > 0 else ""}
+                    {f"| extra rows:{extra_rows}" if extra_rows > 0 else ""}
+                    {f"| duplicate rows:{duplicates}" if duplicates > 0 else ""}
+                </span>
+                <div id="diff-{csv_file}" style="display:none; margin-top: 10px;">
+                    <table class="diff-table">
+                        <thead>
+                            <tr>
+                                <th width="50%">Primary Key</th>
+                                <th width="10%">Column</th>
+                                <th width="10%">Engine</th>
+                                <th width="10%">Neoprice</th>
+                                <th width="10%">Diff</th>
+                                <th width="10%">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {diff_table}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            """ if match_status == "FAIL" else
+            "<div style='color: green;'>The files are identical. No differences were found during the comparison.</div>"
+        )
+
+        comparison_row = f"""
+        <tr>
+            <td><i class="fas fa-file-csv" style="color:blue;"></i> {csv_file}</td>
+            <td align="center">{icon}</td>
+            <td>{mismatch_details}</td>
+        </tr>
+        """
+        return comparison_row, local_metrics, row_discrepancies, engine_rows, neoprice_rows, fields, duplicates, missing_rows, extra_rows
+
+    # Process files
+    comparison_rows_list = []
+    total_row_discrepancies = total_engine_rows = total_neoprice_rows = total_fields_compared = total_duplicates = total_missing_rows = total_extra_rows = 0
+    if use_multithreading:
+        with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 2)) as executor:
+            futures = [executor.submit(process_file, csv_file, file_summary) for csv_file, file_summary in summary.items()]
+            for future in tqdm(futures, desc="Generating Report"):
+                result = future.result()
+                if result:
+                    comparison_row, local_metrics, row_disc, eng_rows, neo_rows, fields, dups, miss_rows, ext_rows = result
+                    if comparison_row:
+                        comparison_rows_list.append(comparison_row)
+                    with metrics_lock:
+                        for col, metrics in local_metrics.items():
+                            global_percentage_metrics[col]['total'] += metrics['total']
+                            global_percentage_metrics[col]['mismatches'] += metrics['mismatches']
+                    total_row_discrepancies += row_disc
+                    total_engine_rows += eng_rows
+                    total_neoprice_rows += neo_rows
+                    total_fields_compared += fields
+                    total_duplicates += dups
+                    total_missing_rows += miss_rows
+                    total_extra_rows += ext_rows
+    else:
+        for csv_file, file_summary in tqdm(summary.items(), desc="Generating Report"):
+            result = process_file(csv_file, file_summary)
+            if result:
+                comparison_row, local_metrics, row_disc, eng_rows, neo_rows, fields, dups, miss_rows, ext_rows = result
+                if comparison_row:
+                    comparison_rows_list.append(comparison_row)
+                for col, metrics in local_metrics.items():
+                    global_percentage_metrics[col]['total'] += metrics['total']
+                    global_percentage_metrics[col]['mismatches'] += metrics['mismatches']
+                total_row_discrepancies += row_disc
+                total_engine_rows += eng_rows
+                total_neoprice_rows += neo_rows
+                total_fields_compared += fields
+                total_duplicates += dups
+                total_missing_rows += miss_rows
+                total_extra_rows += ext_rows
+
+    # Finalize global percentage metrics
+    for col in global_percentage_metrics:
+        if global_percentage_metrics[col]['total'] > 0:
+            global_percentage_metrics[col]['pass_percent'] = round(
+                (1 - (global_percentage_metrics[col]['mismatches'] / 
+                      global_percentage_metrics[col]['total'])) * 100, 2
+            )
+            global_percentage_metrics[col]['fail_percent'] = round(
+                (global_percentage_metrics[col]['mismatches'] / 
+                 global_percentage_metrics[col]['total']) * 100, 2
+            )
+
+    # Combine comparison rows
+    comparison_rows = "".join(comparison_rows_list)
+
+    # Add missing/extra files
+    if include_missing_files and "Missing in Source2" in summary:
+        total_missing_files = len(summary["Missing in Source2"])
+        comparison_rows += "".join(
+            f"""
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> {missing_csv}</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:orange;"></i></td>
+                <td>Missing in Neoprice</td>
+            </tr>
+            """
+            for missing_csv in summary["Missing in Source2"]
+        )
+    if include_extra_files and "Extra in Source2" in summary:
+        comparison_rows += "".join(
+            f"""
+            <tr>
+                <td><i class="fas fa-file-csv" style="color:gray;"></i> {extra_csv}</td>
+                <td align="center"><i class="fas fa-exclamation-triangle" style="color:blue;"></i></td>
+                <td>Extra in Neoprice</td>
+            </tr>
+            """
+            for extra_csv in summary["Extra in Source2"]
+        )
+
+    # Build global percentage section
+    global_percentage_section = ""
+    if global_percentage:
+        global_percentage_section = "<h2>📈 Column-Specific Metrics</h2><div class='metrics-container'>" + "".join(
+            f"""
+            <div class="metric-card {'pass-metric' if metrics['fail_percent'] == 0 else 'fail-metric'}">
+                <div class="metric-value">{metrics['pass_percent']}%</div>
+                <div class="metric-label">{col} Pass Rate</div>
+                <div class="metric-subtext">
+                    {metrics['mismatches']} of {metrics['total']} mismatches
+                </div>
+            </div>
+            """
+            for col, metrics in global_percentage_metrics.items()
+        ) + "</div>"
+
+    # Calculate overall row pass rate
+    overall_row_pass = 100.0 if total_engine_rows == 0 else round(
+        ((total_engine_rows - total_row_discrepancies) / total_engine_rows) * 100, 5
+    )
+
+    # HTML template
+    html_template = f"""<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>{project_name} Report</title>
+        <link rel="icon" type="image/x-icon" href="{project_logo}">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+        <style>
+            body {{ font-family: Arial, sans-serif; background: #f4f4f9; margin: 0; padding: 0; }}
+            .container {{ background: white; margin: 10px auto; padding: 10px; max-width: 98%; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            header {{ background-color: #173E72; color: white; padding: 5px; text-align: center; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 15px; word-break: break-word; table-layout: fixed; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background: #173E72; color: white; position: sticky; top: 0; }}
+            tr:nth-child(even) {{ background: #f9f9f9; }}
+            tr:hover {{ background: #f1f1f1; }}
+            .toggle-button {{ font-size: 0.8em; padding: 3px 8px; background-color: #0056b3; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+            .summary-badge {{ font-weight: bold; }}
+            .diff-table th {{ background: #173E72; }}
+            .summary-grid {{
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 10px;
+                margin-top: 15px;
+            }}
+            .summary-item {{
+                background: #f8f9fa;
+                padding: 8px;
+                border-radius: 4px;
+                border-left: 4px solid #173E72;
+            }}
+            .summary-label {{
+                font-weight: bold;
+                color: #495057;
+            }}
+            .summary-value {{
+                color: #212529;
+                margin-left: 5px;
+            }}
+            .numeric-diff {{
+                font-family: monospace;
+                text-align: right;
+            }}
+            .positive-diff {{ color: #d9534f; }}
+            .negative-diff {{ color: #5cb85c; }}
+            header img {{
+                height: 60px;
+                width: auto;
+                max-width: 200px;
+            }}
+            .metrics-container {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 20px 0;
+            }}
+            .metric-card {{
+                background: white;
+                border-radius: 8px;
+                padding: 15px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                text-align: center;
+            }}
+            .metric-value {{
+                font-size: 24px;
+                font-weight: bold;
+                margin: 5px 0;
+            }}
+            .metric-label {{
+                color: #6c757d;
+                font-size: 14px;
+            }}
+            .metric-subtext {{
+                font-size: 12px;
+                color: #6c757d;
+                margin-top: 5px;
+            }}
+            .smaller-text {{
+                font-size: 0.9em;
+            }}
+            .pass-metric {{ border-top: 4px solid #28a745; }}
+            .fail-metric {{ border-top: 4px solid #dc3545; }}
+            .warn-metric {{ border-top: 4px solid #ffc107; }}
+            .neutral-metric {{ border-top: 4px solid #66b2ff; }}
+        </style>
+        <script>
+            function toggleVisibility(id, btn) {{
+                var el = document.getElementById(id);
+                if (el.style.display === 'none') {{
+                    el.style.display = 'block';
+                    btn.innerHTML = '-';
+                }} else {{
+                    el.style.display = 'none';
+                    btn.innerHTML = '+';
+                }}
+            }}
+        </script>
+    </head>
+    <body>
+        <header>
+        <table style="border: none; width: 100%;">
+            <tr>
+                <td style="border: none; text-align: left; width: 20%; padding: 5px 0;">
+                    <img src="{project_logo}" alt="{project_name}" style="height: 40px; width: auto;">
+                </td>
+                <td style="border: none; text-align: center; padding: 5px 0;">
+                    <h1 style="margin: 0; font-size: 1.5em;">{project_name} - CSV Comparison Report</h1>
+                    <p style="margin: 2px 0 0; font-size: 0.9em;"> <strong>Generated:</strong> {report_start_time.strftime('%Y-%m-%d %H:%M:%S')} | <strong>Duration:</strong> {time_taken_str}</p>
+                </td>
+                <td style="border: none; text-align: right; width: 20%; padding: 5px 0;">
+                    <div style="font-size: 1.2em; font-weight: bold; color: { '#28a745' if overall_row_pass >= 99.99 else '#dc3545' }">
+                        {overall_row_pass}% Row Pass
+                    </div>
+                </td>
+            </tr>
+        </table>
+    </header>
+    <div class="container">
+        <h2>📊 Key Metrics</h2>
+        <div class="metrics-container">
+            <div class="metric-card pass-metric">
+                <div class="metric-value">{overall_row_pass}%</div>
+                <div class="metric-label">Overall Row Pass Rate</div>
+            </div>
+            <div class="metric-card fail-metric">
+                <div class="metric-value">{total_row_discrepancies}</div>
+                <div class="metric-label">Row Discrepancies</div>
+            </div>
+            <div class="metric-card neutral-metric">
+                <div class="metric-value">{total_engine_rows}</div>
+                <div class="metric-label">Total Engine Rows</div>
+            </div>
+            <div class="metric-card neutral-metric">
+                <div class="metric-value">{total_neoprice_rows}</div>
+                <div class="metric-label">Total Neoprice Rows</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">{total_missing_rows}</div>
+                <div class="metric-label">Missing Rows</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">{total_extra_rows}</div>
+                <div class="metric-label">Extra Rows</div>
+            </div>
+            <div class="metric-card warn-metric">
+                <div class="metric-value">{total_duplicates}</div>
+                <div class="metric-label">Duplicate Rows</div>
+            </div>
+        </div>
+
+        {global_percentage_section}
+
+        <h2>🔍 Comparison Details</h2>
+        <ul>
+            <li><strong><i class="fas fa-file-alt"></i> Files in Engine:</strong> {source_files_count}</li>
+            <li><strong><i class="fas fa-file-alt"></i> Files in Neoprice:</strong> {destination_files_count}</li>
+            <li>
+                <strong><i class="fas fa-key"></i> Primary Keys:</strong> 
+                <button class="toggle-button" onclick="toggleVisibility('primaryKeys', this)">+</button>
+                <span id="primaryKeys" style="display:none;">
+                    <span class="smaller-text">{', '.join(primary_key_columns)}</span>
+                </span>
+            </li>
+            <li>
+                <strong><i class="fas fa-columns"></i> Compared Columns:</strong>
+                <button class="toggle-button" onclick="toggleVisibility('comparedColumns', this)">+</button>
+                <span id="comparedColumns" style="display:none;">
+                    <span class="smaller-text">{"All Columns" if not columns else ', '.join(columns)}</span>
+                </span>
+            </li>
+        </ul>
+
+        <h2>📝 File Comparison Results</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th width="20%" nowrap>CSV File</th>
+                    <th width="5%">Status</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {comparison_rows}
+            </tbody>
+        </table>
+    </div>
+    </body>
+    </html>
+    """
+
+    output_buffer = StringIO()
+    output_buffer.write(html_template)
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(output_buffer.getvalue())
+    output_buffer.close()

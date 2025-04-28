@@ -1,0 +1,735 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import base64
+from io import BytesIO
+from datetime import datetime, timedelta
+import os
+import tempfile
+import webbrowser
+import win32com.client  # For Outlook email integration
+
+# Static project metadata (can be made configurable via input or config file)
+PROJECT_NAME = "Sample Project"
+PREPARED_BY = "Project Manager"
+PROJECT_DESCRIPTION = "This project aims to deliver a comprehensive solution for task management."
+PROJECT_SCOPE = "Includes task tracking, progress monitoring, and reporting. Excludes hardware integration."
+CURRENT_PHASE = "Execution"
+LOGO_PATH = "to/logo.png"  # Replace with actual logo path
+
+# Email configuration
+EMAIL = False  # Set to True to send email, False to open in browser
+TO = "recipient1@example.com,recipient2@example.com"  # Comma-separated recipients
+CC = "cc1@example.com,cc2@example.com"  # Comma-separated CC recipients
+
+# 1. Load Excel data and clean column names
+def load_data(file_path):
+    try:
+        data = pd.read_excel(file_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Excel file '{file_path}' not found.")
+    except Exception as e:
+        raise Exception(f"Error reading Excel file: {str(e)}")
+
+    data.columns = data.columns.str.strip().str.lower()
+    data.rename(columns={
+        'percentage complete': 'percent_complete',
+        'start date': 'start_date',
+        'end date': 'end_date',
+        'next action item': 'next_action_item',
+        'milestone name': 'milestone_name',
+        'milestone completion date': 'milestone_completion_date',
+        'milestone due date': 'milestone_due_date',
+        'risk description': 'risk_description',
+        'risk impact': 'risk_impact',
+        'risk mitigation': 'risk_mitigation',
+        'issue description': 'issue_description',
+        'issue impact': 'issue_impact',
+        'issue action plan': 'issue_action_plan',
+        'action due date': 'action_due_date',
+        'dependency': 'dependency'
+    }, inplace=True)
+    
+    if 'percent_complete' not in data.columns:
+        raise ValueError("'percent_complete' column not found in Excel sheet")
+    
+    if data['percent_complete'].max() <= 1.0:
+        data['percent_complete'] *= 100
+    
+    today = datetime.today()
+    data['expected_progress'] = data.apply(lambda row: calculate_expected_progress(row, today), axis=1)
+    
+    # Check for next_action_item column
+    possible_action_columns = ['next_action_item', 'next_action', 'action_item']
+    action_column = next((col for col in possible_action_columns if col in data.columns), None)
+    if action_column is None:
+        raise ValueError("No 'next_action_item', 'next_action', or 'action_item' column found in Excel sheet")
+    data['next_action_item'] = data[action_column]
+    
+    # Replace NaN with empty string
+    data = data.fillna('')
+    
+    return data
+
+# 2. Function to calculate expected progress
+def calculate_expected_progress(row, today):
+    try:
+        start_date = pd.to_datetime(row['start_date']) if row['start_date'] else None
+        end_date = pd.to_datetime(row['end_date']) if row['end_date'] else None
+    except ValueError as e:
+        raise ValueError(f"Invalid date format in start_date or end_date: {str(e)}")
+    
+    if start_date is None or end_date is None:
+        return 0
+    
+    total_duration = count_weekdays(start_date, end_date)
+    
+    if end_date < today:
+        elapsed_time = count_weekdays(start_date, end_date)
+    else:
+        elapsed_time = count_weekdays(start_date, today)
+    
+    if total_duration > 0:
+        expected_progress = (elapsed_time / total_duration) * 100
+    else:
+        expected_progress = 0
+    
+    return expected_progress
+
+# 3. Helper function to count weekdays
+def count_weekdays(start_date, end_date):
+    total_days = (end_date - start_date).days
+    weekdays_count = 0
+    
+    for i in range(total_days + 1):
+        current_day = start_date + timedelta(days=i)
+        if current_day.weekday() < 5:
+            weekdays_count += 1
+    
+    return weekdays_count
+
+# 4. Calculate overall team progress and project status
+def calculate_overall_progress(data):
+    avg_team_progress = data['percent_complete'].mean()
+    avg_expected_progress = data['expected_progress'].mean()
+    
+    progress_diff = avg_team_progress - avg_expected_progress
+    if -0.1 <= progress_diff <= 0.1:
+        status = "🟢 Green"  # Exactly on track
+    elif progress_diff > 0.1:
+        status = "🔵 Blue"   # Ahead
+    elif -10 < progress_diff < -0.1:
+        status = "🟡 Amber"  # Slightly behind
+    else:
+        status = "🔴 Red"    # Significantly behind
+    
+    return avg_team_progress, avg_expected_progress, status
+
+# 5. Generate pie chart for team progress
+def generate_team_progress_chart(data):
+    avg_complete = data['percent_complete'].mean()
+    
+    fig, ax = plt.subplots(figsize=(4, 4))  # Standardized size
+    wedges, texts, autotexts = ax.pie(
+        [avg_complete, 100-avg_complete],
+        labels=['Actual', 'Remaining'],
+        colors=['#008000', '#E8ECEF'],  # Green for Actual, Light Gray for Remaining
+        startangle=90,
+        autopct='%1.0f%%',
+        textprops={'fontsize': 10, 'fontfamily': 'Arial'}
+    )
+    ax.set_title('Team Progress (Pie Chart)', pad=10, fontsize=12, fontfamily='Arial', color='#003087')
+    plt.setp(autotexts, size=9, weight="bold", color='white')
+    plt.setp(texts, size=10, fontfamily='Arial')
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor('none')
+    plt.tight_layout(pad=0.5)
+    
+    img_data = fig_to_base64(fig)
+    plt.close(fig)
+    return img_data
+
+# 6. Generate clustered bar chart for task progress
+def generate_task_progress_chart(data):
+    avg_complete = data['percent_complete'].mean()
+    avg_expected = data['expected_progress'].mean()
+    
+    fig, ax = plt.subplots(figsize=(4, 4))  # Standardized size
+    categories = ['Progress']
+    actual = [avg_complete]
+    expected = [avg_expected]
+    
+    bar_width = 0.35
+    x = range(len(categories))
+    
+    ax.bar([i - bar_width/2 for i in x], actual, bar_width, label='Actual', color='#0000FF')  # Blue
+    ax.bar([i + bar_width/2 for i in x], expected, bar_width, label='Expected', color='#FFBF00')  # Amber
+    
+    ax.set_ylim(0, 100)
+    ax.set_ylabel('Progress (%)', fontsize=10, fontfamily='Arial')
+    ax.set_title('Task Progress (Clustered Chart)', pad=10, fontsize=12, fontfamily='Arial', color='#003087')
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, fontsize=9, fontfamily='Arial')
+    ax.tick_params(axis='y', which='major', labelsize=9)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(fontsize=9, frameon=False, loc='upper center', bbox_to_anchor=(0.5, -0.05))
+    
+    for i, v in enumerate(actual):
+        ax.text(i - bar_width/2, v + 2, f'{v:.0f}%', ha='center', va='bottom', fontsize=9, fontfamily='Arial')
+    for i, v in enumerate(expected):
+        ax.text(i + bar_width/2, v + 2, f'{v:.0f}%', ha='center', va='bottom', fontsize=9, fontfamily='Arial')
+    
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor('none')
+    plt.tight_layout(pad=0.5)
+    
+    img_data = fig_to_base64(fig)
+    plt.close(fig)
+    return img_data
+
+# 7. Generate line chart for individual progress
+def generate_individual_progress_chart(data):
+    if 'name' not in data.columns:
+        return "<p style='text-align:center;color:#C2185B;font-family:Roboto;font-size:13px;'>No 'name' column found for individual progress chart.</p>"
+    
+    individual_progress = data.groupby('name')['percent_complete'].mean().reset_index()
+    fig, ax = plt.subplots(figsize=(4, 4))  # Standardized size
+    sns.lineplot(data=individual_progress, x='name', y='percent_complete', 
+                 marker='o', color='#FF0000', linewidth=2, ax=ax)  # Red
+    ax.set_ylim(0, 100)
+    ax.set_ylabel('Progress (%)', fontsize=10, fontfamily='Arial')
+    ax.set_title('Individual Progress (Line Chart)', pad=10, fontsize=12, fontfamily='Arial', color='#003087')
+    ax.tick_params(axis='both', which='major', labelsize=9)
+    ax.grid(True, linestyle='--', alpha=0.5)
+    plt.xticks(rotation=45, ha='right', fontsize=9, fontfamily='Arial')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor('none')
+    plt.tight_layout(pad=0.5)
+    
+    img_data = fig_to_base64(fig)
+    plt.close(fig)
+    return img_data
+
+# 8. Convert matplotlib chart to base64
+def fig_to_base64(fig):
+    buf = BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', transparent=True)
+    buf.seek(0)
+    image_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    buf.close()
+    return f"<img src='data:image/png;base64,{image_base64}' style='width:300px; height:300px; object-fit:contain;'/>"
+
+# 9. Generate status table (for Progress Summary)
+def generate_status_table(data):
+    data['progress_diff'] = data['percent_complete'] - data['expected_progress']
+    
+    def get_status(row):
+        diff = row['progress_diff']
+        if -0.1 <= diff <= 0.1:
+            status = '🟢 on track'
+            recommendation = 'Maintain your current pace to stay on track.'
+        elif diff > 0.1:
+            status = f'🟢 ahead (+{diff:.0f}%)'
+            recommendation = f'You are ahead by {diff:.0f}%. Ensure quality is not compromised and verify if tasks can support others.'
+        elif -10 < diff < -0.1:
+            status = f'🟡 behind ({-diff:.0f}%)'
+            recommendation = f'You are behind by {-diff:.0f}%. Prioritize critical tasks and seek support if needed.'
+        else:
+            status = f'🔴 delayed ({-diff:.0f}%)'
+            recommendation = f'You are significantly behind by {-diff:.0f}%. Escalate issues and develop a recovery plan immediately.'
+        return pd.Series([status, recommendation])
+    
+    data[['status_icon', 'recommendation']] = data.apply(get_status, axis=1)
+    
+    # Wrap status_icon in span with tooltip
+    data['status_icon'] = data.apply(lambda row: f'<span title="{row["recommendation"]}">{row["status_icon"]}</span>', axis=1)
+    
+    summary = data[['name', 'task', 'percent_complete', 'status_icon']].copy()
+    summary['percent_complete'] = summary['percent_complete'].apply(lambda x: f'{x:.0f}%' if x != '' else '')
+    summary.columns = ['Name', 'Task', 'Progress', 'Status']
+    
+    # Replace NaN with empty string
+    summary = summary.fillna('')
+    
+    return summary
+
+# 10. Generate milestones table (only completed milestones, non-empty)
+def generate_milestones_table(data):
+    if 'milestone_name' not in data.columns or 'milestone_completion_date' not in data.columns:
+        return pd.DataFrame(columns=['Milestone', 'Completion Date', 'Status'], data=[])
+    
+    # Filter for completed milestones with non-empty milestone_name and milestone_completion_date
+    milestones = data[['milestone_name', 'milestone_completion_date']].copy()
+    milestones = milestones[
+        (milestones['milestone_name'] != '') & 
+        (milestones['milestone_completion_date'] != '')
+    ]
+    
+    if milestones.empty:
+        return pd.DataFrame(columns=['Milestone', 'Completion Date', 'Status'], data=[])
+    
+    milestones['status'] = 'Completed'
+    
+    milestones = milestones.rename(columns={
+        'milestone_name': 'Milestone',
+        'milestone_completion_date': 'Completion Date',
+        'status': 'Status'
+    })
+    
+    # Replace NaN with empty string
+    milestones = milestones.fillna('')
+    
+    return milestones[['Milestone', 'Completion Date', 'Status']]
+
+# 11. Generate risks table (only risks, no issues)
+def generate_risks_issues_table(data):
+    risks_cols = ['risk_description', 'risk_impact', 'risk_mitigation']
+    
+    if all(col in data.columns for col in risks_cols):
+        risks_data = data[risks_cols].dropna(subset=['risk_description']).copy()
+        risks_data = risks_data[risks_data['risk_description'] != '']
+    else:
+        risks_data = pd.DataFrame()
+    
+    risks_data = risks_data.rename(columns={
+        'risk_description': 'Description',
+        'risk_impact': 'Impact',
+        'risk_mitigation': 'Mitigation'
+    })
+    
+    if risks_data.empty:
+        return pd.DataFrame(columns=['Description', 'Impact', 'Mitigation'], data=[])
+    
+    # Replace NaN with empty string
+    risks_data = risks_data.fillna('')
+    
+    return risks_data[['Description', 'Impact', 'Mitigation']]
+
+# 12. Generate action items table
+def generate_action_items_table(data):
+    if 'next_action_item' not in data.columns or 'name' not in data.columns:
+        return pd.DataFrame(columns=['Immediate Action', 'Responsible Person', 'Due Date'], data=[])
+    
+    actions = data[['next_action_item', 'name', 'action_due_date']].dropna(subset=['next_action_item']).copy()
+    actions = actions[actions['next_action_item'] != '']
+    actions = actions.rename(columns={
+        'next_action_item': 'Immediate Action',
+        'name': 'Responsible Person',
+        'action_due_date': 'Due Date'
+    })
+    
+    # Replace NaN with empty string
+    actions = actions.fillna('')
+    
+    return actions
+
+# 13. Calculate timeline status
+def calculate_timeline_status(data):
+    if 'end_date' not in data.columns:
+        return "Unknown", "No end date data available."
+    
+    today = datetime.today()
+    delays = data[pd.to_datetime(data['end_date']) < today]['task'].count()
+    if delays > 0:
+        return "Delayed", f"{delays} tasks are past their end date."
+    return "On Schedule", "All tasks are on track."
+
+# 14. Generate immediate action recommendations for Red statuses only
+def generate_immediate_action_recommendations(data):
+    data['progress_diff'] = data['percent_complete'] - data['expected_progress']
+    
+    # Filter for Red statuses only
+    at_risk = data[data['progress_diff'] <= -10][['name', 'task', 'progress_diff']].copy()
+    
+    if at_risk.empty:
+        return pd.DataFrame(columns=['Name', 'Recommendation'], data=[])
+    
+    def get_recommendation(row):
+        diff = -row['progress_diff']
+        name = row['name']
+        task = row['task']
+        return f"{name}, you are significantly behind by {diff:.0f}% on '{task}'. Urgently create a recovery plan, including additional support or schedule adjustments, to complete within the deadline."
+    
+    at_risk['Recommendation'] = at_risk.apply(get_recommendation, axis=1)
+    at_risk = at_risk[['name', 'Recommendation']].rename(columns={'name': 'Name'})
+    
+    # Replace NaN with empty string
+    at_risk = at_risk.fillna('')
+    
+    return at_risk
+
+# 15. Send email via Outlook
+def send_email_via_outlook(to, cc, subject, html_body):
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)  # 0 = MailItem
+        mail.To = to
+        mail.CC = cc
+        mail.Subject = subject
+        mail.HTMLBody = html_body
+        mail.Send()
+        print("📧 Email sent successfully.")
+    except Exception as e:
+        print(f"Error sending email: {str(e)}")
+
+# 16. Compose HTML email/report body
+def prepare_email_body(status_table, milestones_table, risks_table, action_items_table, 
+                      immediate_action_table, team_chart_img, task_chart_img, 
+                      individual_chart_img, project_status, timeline_status, timeline_comment,
+                      reporting_period=""):
+    styled_status_table = status_table.to_html(index=False, escape=False, border=0)
+    styled_milestones_table = milestones_table.to_html(index=False, escape=False, border=0)
+    styled_risks_table = risks_table.to_html(index=False, escape=False, border=0)
+    styled_action_items_table = action_items_table.to_html(index=False, escape=False, border=0)
+    styled_immediate_action_table = immediate_action_table.to_html(index=False, escape=False, border=0) if not immediate_action_table.empty else "<p style='color:#666666;font-family:Roboto;font-size:12px;'>No immediate actions required.</p>"
+    
+    # Apply consistent table styling
+    for table_html in [styled_status_table, styled_milestones_table, styled_risks_table, 
+                       styled_action_items_table, styled_immediate_action_table]:
+        if "<table" in table_html:
+            table_html = table_html.replace(
+                '<table>',
+                '<table style="border-collapse: collapse; width: 100%; margin: 15px 0; background-color: #FFFFFF; font-size: 12px;">'
+            )
+    
+    report_date = datetime.today().strftime('%d-%m-%Y')
+    
+    # Use provided Reporting_Period if not empty; otherwise, calculate default (Monday to Friday)
+    if reporting_period:
+        reporting_period = reporting_period.strip()
+    else:
+        today = datetime.today()
+        start_of_week = today - timedelta(days=today.weekday())
+        end_of_week = start_of_week + timedelta(days=4)  # Friday
+        reporting_period = f"{start_of_week.strftime('%d-%m-%Y')} to {end_of_week.strftime('%d-%m-%Y')}"
+    
+    body = f"""
+    <html>
+    <head>
+        <style>
+            body {{
+                font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+                font-size: 14px;
+                color: #333333;
+                padding: 50px;
+                background-color: #F5F7FA;
+                margin: 0;
+            }}
+            .container {{
+                max-width: 960px;
+                margin: 0 auto;
+                background-color: #FFFFFF;
+                border-radius: 12px;
+                box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+                padding: 40px;
+                border: 1px solid #E8ECEF;
+            }}
+            .logo {{
+                position: relative;
+                top: 0;
+                left: 0;
+                margin-bottom: 20px;
+            }}
+            .logo img {{
+                width: 100px;
+                height: auto;
+            }}
+            .header {{
+                text-align: center;
+            }}
+            h1 {{
+                color: #003087;
+                font-size: 28px;
+                margin: 0;
+                font-weight: 700;
+            }}
+            h2 {{
+                color: #003087;
+                font-size: 20px;
+                margin: 30px 0 15px;
+                font-weight: 600;
+                border-bottom: 2px solid #E8ECEF;
+                padding-bottom: 8px;
+                display: flex;
+                align-items: center;
+            }}
+            h2::before {{
+                margin-right: 8px;
+                font-size: 18px;
+            }}
+            h2:nth-of-type(1)::before {{ content: '📋'; }}
+            h2:nth-of-type(2)::before {{ content: '📊'; }}
+            h2:nth-of-type(3)::before {{ content: '⚠️'; }}
+            h2:nth-of-type(4)::before {{ content: '✅'; }}
+            h2:nth-of-type(5)::before {{ content: '🚨'; }}
+            h3 {{
+                color: #003087;
+                font-size: 16px;
+                margin: 20px 0 12px;
+                font-weight: 600;
+                text-align: center;
+            }}
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+                margin: 15px 0;
+                background-color: #FFFFFF;
+                font-size: 12px;
+            }}
+            th, td {{
+                text-align: left;
+                padding: 8px 12px;
+                border-bottom: 1px solid #E0E0E0;
+            }}
+            th {{
+                background-color: #003087;
+                color: #FFFFFF;
+                font-weight: 600;
+                text-transform: uppercase;
+                font-size: 11px;
+            }}
+            tr:nth-child(even) {{
+                background-color: #F9FAFB;
+            }}
+            tr:hover {{
+                background-color: #F1F5F9;
+                transition: background-color 0.2s ease;
+            }}
+            img {{
+                display: block;
+                margin: 10px auto;
+                max-width: 100%;
+                height: auto;
+                border-radius: 6px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }}
+            .chart-container {{
+                display: flex;
+                justify-content: space-between;
+                margin: 30px 0;
+                flex-wrap: wrap;
+                gap: 20px;
+            }}
+            .chart-box {{
+                flex: 1;
+                min-width: 250px;
+                max-width: 30%;
+                padding: 20px;
+                background-color: #FFFFFF;
+                border-radius: 10px;
+                box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+                text-align: center;
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+            }}
+            .chart-box:hover {{
+                transform: translateY(-4px);
+                box-shadow: 0 6px 12px rgba(0,0,0,0.12);
+            }}
+            .chart-box img {{
+                width: 300px;
+                height: 300px;
+                object-fit: contain;
+            }}
+            .status-header {{
+                text-align: center;
+                margin-bottom: 30px;
+                font-size: 16px;
+                font-weight: 500;
+                color: #003087;
+                background-color: #E8ECEF;
+                padding: 15px;
+                border-radius: 8px;
+            }}
+            .status-header p {{
+                margin: 8px 0;
+                line-height: 1.6;
+            }}
+            .overview-table {{
+                width: 100%;
+                margin: 15px 0;
+                font-size: 12px;
+            }}
+            .overview-table th, .overview-table td {{
+                padding: 8px 12px;
+                border: 1px solid #E0E0E0;
+                text-align: left;
+            }}
+            .overview-table th {{
+                background-color: #003087;
+                color: #FFFFFF;
+            }}
+            .footer {{
+                text-align: center;
+                color: #666666;
+                font-size: 12px;
+                margin-top: 40px;
+                border-top: 1px solid #E0E0E0;
+                padding-top: 20px;
+            }}
+            @media (max-width: 768px) {{
+                .chart-box {{
+                    max-width: 100%;
+                    min-width: 100%;
+                }}
+                .chart-box img {{
+                    width: 100%;
+                    height: auto;
+                }}
+                .container {{
+                    padding: 20px;
+                }}
+                .logo img {{
+                    width: 80px;
+                }}
+                h1 {{
+                    font-size: 24px;
+                }}
+            }}
+            .header-row {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 0px;
+                flex-wrap: wrap;
+            }}
+
+            .logo img {{
+                width: 100px;
+                height: 50px;
+            }}
+
+            .header-title {{
+                flex: 1;
+                text-align: center;
+            }}
+
+            @media (max-width: 768px) {{
+                .header-row {{
+                    flex-direction: column;
+                    align-items: center;
+                }}
+                .header-title {{
+                    text-align: center;
+                    margin-top: 10px;
+                }}
+            }}
+
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header-row">
+                <div class="logo">
+                    <img src="{LOGO_PATH}" alt="Company Logo"/>
+                </div>
+                <div class="header-title">
+                    <h1>{PROJECT_NAME} Status Report</h1>
+                </div>
+            </div>
+
+            <div class="status-header">
+                <p>Date: {report_date}</p>
+                <p>Reporting Period: {reporting_period}</p>
+                <p>Prepared by: {PREPARED_BY}</p>
+            </div>
+            
+            <h2>1. Project Overview</h2>
+            <table class="overview-table">
+                <tr><th>Description</th><td>{PROJECT_DESCRIPTION}</td></tr>
+                <tr><th>Scope</th><td>{PROJECT_SCOPE}</td></tr>
+                <tr><th>Current Phase/Stage</th><td>{CURRENT_PHASE}</td></tr>
+            </table>
+            
+            <h2>2. Progress Summary</h2>
+            <p><strong>Current Status (RAG):</strong> {project_status}</p>
+            <div class="chart-container">
+                <div class="chart-box">
+                    <h3>Team Progress (Pie Chart)</h3>
+                    {team_chart_img}
+                </div>
+                <div class="chart-box">
+                    <h3>Task Progress (Clustered Chart)</h3>
+                    {task_chart_img}
+                </div>
+                <div class="chart-box">
+                    <h3>Individual Progress (Line Chart)</h3>
+                    {individual_chart_img}
+                </div>
+            </div>
+            <h3>2.1 Work in Progress (WIP)</h3>
+            {styled_status_table}
+            <h3>2.2 Milestone</h3>
+            {styled_milestones_table}
+            
+            <h2>3. Risks</h2>
+            {styled_risks_table}
+            
+            <h2>4. Next Steps and Action Items</h2>
+            <h3>4.1 Action</h3>
+            {styled_action_items_table}
+            
+            <h2>5. Immediate Action</h2>
+            {styled_immediate_action_table}
+            
+            <div class="footer">
+                <p>Regards,<br>Your Project Management Team</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return body
+
+# 17. Open report in browser
+def open_report_in_browser(body):
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
+        f.write(body)
+        temp_file_path = f.name
+    
+    webbrowser.open(f'file://{os.path.abspath(temp_file_path)}')
+
+# 18. Main function
+def main(reporting_period=""):
+    file_path = 'tasks_data.xlsx'
+    try:
+        data = load_data(file_path)
+        
+        avg_team_progress, avg_expected_progress, project_status = calculate_overall_progress(data)
+        timeline_status, timeline_comment = calculate_timeline_status(data)
+        
+        team_chart_img = generate_team_progress_chart(data)
+        task_chart_img = generate_task_progress_chart(data)
+        individual_chart_img = generate_individual_progress_chart(data)
+        
+        status_table = generate_status_table(data)
+        milestones_table = generate_milestones_table(data)
+        risks_table = generate_risks_issues_table(data)
+        action_items_table = generate_action_items_table(data)
+        immediate_action_table = generate_immediate_action_recommendations(data)
+        
+        email_body = prepare_email_body(
+            status_table, milestones_table, risks_table, action_items_table,
+            immediate_action_table, team_chart_img, task_chart_img, 
+            individual_chart_img, project_status, timeline_status, timeline_comment,
+            reporting_period
+        )
+        
+        if EMAIL:
+            subject = f"{PROJECT_NAME} Status Report - {datetime.today().strftime('%d-%m-%Y')}"
+            send_email_via_outlook(TO, CC, subject, email_body)
+        else:
+            open_report_in_browser(email_body)
+            print("🌐 Report opened in browser.")
+            
+    except Exception as e:
+        print(f"Error generating report: {str(e)}")
+
+# Run the script
+if __name__ == '__main__':
+    # Example usage with Reporting_Period
+    #main(reporting_period="21-04-2025 to 25-04-2025")
+    # For default behavior (current week's Monday to Friday), use:
+    main()

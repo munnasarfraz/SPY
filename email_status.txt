@@ -18,7 +18,7 @@ CURRENT_PHASE = "Execution"
 LOGO_PATH = "to/logo.png"  # Replace with actual logo path
 
 # Email configuration
-EMAIL = True  # Set to True to send email, False to open in browser
+EMAIL = False  # Set to True to send email, False to open in browser
 TO = "recipient1@example.com,recipient2@example.com"  # Comma-separated recipients
 CC = "cc1@example.com,cc2@example.com"  # Comma-separated CC recipients
 
@@ -361,41 +361,13 @@ def generate_immediate_action_recommendations(data):
     
     return at_risk
 
-# 15. Updated function to send email via Outlook with HTML content in body and optional attachment
-def send_email_via_outlook(to, cc, subject, html_body, attach_html=True):
-    try:
-        # Create a temporary HTML file for attachment (if attach_html is True)
-        temp_file_path = None
-        if attach_html:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
-                f.write(html_body)
-                temp_file_path = f.name
-
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        mail = outlook.CreateItem(0)  # 0 = MailItem
-        mail.To = to
-        mail.CC = cc
-        mail.Subject = subject
-
-        # Set the email body to the full HTML report content
-        mail.HTMLBody = html_body
-
-        # Attach the HTML report if enabled
-        if attach_html and temp_file_path:
-            mail.Attachments.Add(temp_file_path)
-
-        mail.Send()
-        print("📧 Email sent successfully with HTML report in body" + (" and attached as a file." if attach_html else "."))
-
-        # Clean up the temporary file
-        if attach_html and temp_file_path:
-            try:
-                os.unlink(temp_file_path)
-            except Exception as e:
-                print(f"Warning: Could not delete temporary file {temp_file_path}: {str(e)}")
-
-    except Exception as e:
-        print(f"Error sending email: {str(e)}")
+# 15. Open report in browser
+def open_report_in_browser(body):
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
+        f.write(body)
+        temp_file_path = f.name
+    
+    webbrowser.open(f'file://{os.path.abspath(temp_file_path)}')
 
 # 16. Compose HTML email/report body
 def prepare_email_body(status_table, milestones_table, risks_table, action_items_table, 
@@ -694,15 +666,7 @@ def prepare_email_body(status_table, milestones_table, risks_table, action_items
     """
     return body
 
-# 17. Open report in browser
-def open_report_in_browser(body):
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
-        f.write(body)
-        temp_file_path = f.name
-    
-    webbrowser.open(f'file://{os.path.abspath(temp_file_path)}')
-
-# 18. Main function
+# 17. Main function (updated to save and attach 'Weekly_Status_Report.html')
 def main(reporting_period=""):
     file_path = 'tasks_data.xlsx'
     try:
@@ -734,9 +698,29 @@ def main(reporting_period=""):
             email_body = re.sub(r'\n\s*\n', '\n', email_body)
             email_body = re.sub(r'\s{2,}', ' ', email_body)
         
+        # Save the HTML report as 'Weekly_Status_Report.html'
+        # html_file_path = 'Weekly_Status_Report.html'
+        html_file_path = f"report/Weekly_Status_Report_{datetime.today().strftime('%Y%m%d')}.html"
+        with open(html_file_path, 'w', encoding='utf-8') as f:
+            f.write(email_body)
+        print(f"📄 HTML report saved as '{html_file_path}'")
+        
         if EMAIL:
-            subject = f"{PROJECT_NAME} Status Report - {datetime.today().strftime('%d-%m-%Y')}"
-            send_email_via_outlook(TO, CC, subject, email_body, attach_html=True)
+            subject = f"{PROJECT_NAME} Wweekly Status Report - {datetime.today().strftime('%d-%m-%Y')}"
+            # Send email with the saved HTML file as an attachment
+            try:
+                outlook = win32com.client.Dispatch("Outlook.Application")
+                mail = outlook.CreateItem(0)  # 0 = MailItem
+                mail.To = TO
+                mail.CC = CC
+                mail.Subject = subject
+                mail.HTMLBody = email_body
+                # Attach the saved HTML file
+                mail.Attachments.Add(os.path.abspath(html_file_path))
+                mail.Send()
+                print(f"📧 Email sent successfully with '{html_file_path}' attached.")
+            except Exception as e:
+                print(f"Error sending email: {str(e)}")
         else:
             open_report_in_browser(email_body)
             print("🌐 Report opened in browser.")

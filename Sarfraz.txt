@@ -837,19 +837,19 @@ def generate_html_report(
             """
 
     # Build global percentage section
+    # Build global percentage section
     global_percentage_section = ""
     if global_percentage:
         global_percentage_section = "<h2>📈 Column-Specific Metrics</h2>"
         global_percentage_section += "<div class='metrics-container'>"
-        # for col, metrics in global_percentage_metrics.items():
         for metric in global_metrics:
             global_percentage_section += f"""
-                <div class="metric-card {{ metric.metric_class }}">
-                    <div class="metric-value">{{ metric.pass_percentage }}%</div>
-                    <div class="metric-label">{{ metric.column }}</div>
-                    <div class="metric-subtext">{{ metric.fail_count }} fail out of {{ metric.total_rows }} rows</div>
+                <div class="metric-card {metric['metric_class']}">
+                    <div class="metric-value">{metric['pass_percentage']}%</div>
+                    <div class="metric-label">{metric['column']}</div>
+                    <div class="metric-subtext">{metric['fail_count']} fail out of {metric['total_rows']} rows</div>
                 </div>
-           """
+            """
         global_percentage_section += "</div>"
 
     # HTML template (unchanged)

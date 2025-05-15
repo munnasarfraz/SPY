@@ -167,3 +167,178 @@ def run_ssm_command(instance_id, command):
             return
 
 
+--------------------------------------------------------------
+import boto3
+import time
+import concurrent.futures
+from datetime import datetime
+
+# --- Configuration ---
+AWS_PROFILE = "my-sso-profile"  # Change this to your AWS SSO profile name
+
+# Create session using SSO profile
+session = boto3.Session(profile_name=AWS_PROFILE)
+
+# Clients
+ssm_client = session.client('ssm')
+s3_client = session.client('s3')
+
+
+def lambda_handler(event, context):
+    instance_source = event['source_instance']
+    instance_destination = event['target_instance']
+    s3_bucket = event['s3_bucket']
+
+    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+
+    services = [
+        {
+            'name': 'servicefee_engine',
+            'source_path': event['source_path_servicefee'],
+            'destination_path': event['destination_path_servicefee'],
+            'zip_file_base': 'servicefee_backup'
+        }
+    ]
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for service in services:
+            futures.append(executor.submit(
+                process_transfer,
+                instance_source,
+                instance_destination,
+                service['source_path'],
+                service['destination_path'],
+                s3_bucket,
+                service['zip_file_base'],
+                service['name'],
+                timestamp
+            ))
+
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+
+    # Summary
+    for result in results:
+        print(f"{result['service']}: {result['status']} in {result['duration_seconds']} seconds")
+
+    return {
+        'status': 'Success',
+        'message': f'All services transferred successfully at {timestamp}.',
+        'details': results
+    }
+
+
+def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
+    s3_prefix = f"temp/{timestamp}/{service_folder}"
+    max_size_mb = 50
+    max_size_bytes = max_size_mb * 1024 * 1024
+    start_time = time.time()
+
+    zip_file_path = f"/mnt/{zip_file_base}.zip"
+
+    compress_command = f"""
+        if [ ! -d "{source_path}" ] || [ -z "$(ls -A {source_path})" ]; then
+            echo "[{service_folder}] Directory is missing or empty. Skipping transfer."
+            exit 0
+        fi
+
+        dir_size=$(du -sb {source_path} | cut -f1)
+        echo "[{service_folder}] Directory size: $dir_size bytes"
+
+        cd {source_path}
+
+        if [ $dir_size -gt {max_size_bytes} ]; then
+            echo "[{service_folder}] Splitting zip since size is $dir_size bytes"
+            zip -r -s 50m {zip_file_path} .
+        else
+            echo "[{service_folder}] Regular zip since size is $dir_size bytes"
+            zip -r {zip_file_path} .
+        fi
+
+        echo "[{service_folder}] Listing zip parts in /mnt/"
+        ls -lh /mnt/{zip_file_base}.*
+
+        aws s3 cp /mnt/ s3://{s3_bucket}/{s3_prefix}/ --recursive --exclude "*" --include "{zip_file_base}*.zip"
+
+        rm -f /mnt/{zip_file_base}.z* /mnt/{zip_file_base}.zip
+    """
+
+    extract_command = f"""
+        aws s3 cp s3://{s3_bucket}/{s3_prefix}/ /mnt/ --recursive --exclude "*" --include "{zip_file_base}*.zip"
+        unzip -o /mnt/{zip_file_base}.zip -d {destination_path}
+        rm -f /mnt/{zip_file_base}.z* /mnt/{zip_file_base}.zip
+    """
+
+    try:
+        run_ssm_command(instance_source, compress_command)
+
+        # Check if anything was uploaded to S3
+        result = s3_client.list_objects_v2(Bucket=s3_bucket, Prefix=f"{s3_prefix}/")
+        if 'Contents' not in result:
+            duration = round(time.time() - start_time, 2)
+            msg = f"[{service_folder}] No files to transfer. Source folder is empty or missing."
+            print(msg)
+            return {
+                'status': 'Skipped',
+                'service': service_folder,
+                'duration_seconds': duration,
+                'message': msg
+            }
+
+        run_ssm_command(instance_destination, extract_command)
+        duration = round(time.time() - start_time, 2)
+        return {
+            'status': 'Success',
+            'service': service_folder,
+            'duration_seconds': duration,
+            'message': f"{zip_file_base} transfer complete in {duration} seconds."
+        }
+
+    except Exception as e:
+        duration = round(time.time() - start_time, 2)
+        print(f"[{service_folder}] Transfer failed after {duration} seconds: {e}")
+        return {
+            'status': 'Error',
+            'service': service_folder,
+            'duration_seconds': duration,
+            'message': str(e)
+        }
+
+
+def run_ssm_command(instance_id, command):
+    print(f"[{instance_id}] Executing SSM command...")
+    response = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': [command]},
+        TimeoutSeconds=1800,
+    )
+
+    command_id = response['Command']['CommandId']
+
+    for _ in range(60):
+        time.sleep(5)
+        output = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id
+        )
+        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+            print(f"[{instance_id}] STDOUT:\n{output['StandardOutputContent']}")
+            if output['Status'] != 'Success':
+                raise Exception(f"[{instance_id}] Command failed:\n{output['StandardErrorContent']}")
+            return
+
+
+# --- Run Locally ---
+if __name__ == "__main__":
+    test_event = {
+        "source_instance": "i-0example123source",  # Replace with your source EC2 instance ID
+        "target_instance": "i-0example456target",  # Replace with your target EC2 instance ID
+        "s3_bucket": "your-s3-bucket-name",        # Replace with your S3 bucket
+        "source_path_servicefee": "/home/ec2-user/data",         # Path on source EC2
+        "destination_path_servicefee": "/home/ec2-user/restore"  # Path on destination EC2
+    }
+
+    lambda_handler(test_event, None)

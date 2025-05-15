@@ -579,3 +579,130 @@ if __name__ == "__main__":
     }
 
     lambda_handler(test_event, None)
+
+
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
+    s3_prefix = f"temp/{timestamp}/{service_folder}"
+    start_time = time.time()
+
+    # Step 1: Get directory size on source EC2
+    dir_size = get_directory_size_via_ssm(instance_source, source_path)
+    logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
+
+    # Step 2: Split on EC2 if needed
+    if dir_size > SPLIT_ON:
+        logger.info(f"[{service_folder}] Directory size exceeds {SPLIT_ON}, splitting on EC2.")
+        split_files = split_directory_via_ssm(instance_source, source_path, zip_file_base)
+    else:
+        logger.info(f"[{service_folder}] Directory size within limit. Zipping single archive.")
+        split_files = compress_directory_via_ssm(instance_source, source_path, zip_file_base)
+
+    if not split_files:
+        logger.error(f"[{service_folder}] No archive/split files were created.")
+        return {
+            'status': 'Error',
+            'service': service_folder,
+            'message': f"Failed to create archive for {service_folder}."
+        }
+
+    # Step 3: Upload split files to S3 from EC2
+    upload_results = upload_files_to_s3_via_ssm(instance_source, split_files, s3_bucket, s3_prefix)
+    if not all(upload_results):
+        logger.error(f"[{service_folder}] Upload failed. Aborting.")
+        return {
+            'status': 'Error',
+            'service': service_folder,
+            'message': f"Upload to S3 failed for {service_folder}."
+        }
+
+    # Step 4: Download and extract on destination EC2
+    download_results = download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path)
+
+    duration = round(time.time() - start_time, 2)
+    status = "Success" if all(download_results) else "Error"
+    return {
+        'status': status,
+        'service': service_folder,
+        'duration_seconds': duration,
+        'message': f"{service_folder} transfer completed with status: {status}."
+    }
+
+def get_directory_size_via_ssm(instance_id, source_path):
+    cmd = f"du -sb {source_path} | cut -f1"
+    output = run_ssm_command_and_get_output(instance_id, cmd)
+    return int(output.strip())
+
+def split_directory_via_ssm(instance_id, source_path, zip_file_base):
+    cmd = (
+        f"cd {source_path} && "
+        f"tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
+    )
+    run_ssm_command(instance_id, cmd)
+    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
+    output = run_ssm_command_and_get_output(instance_id, list_cmd)
+    return output.strip().split('\n')
+
+def compress_directory_via_ssm(instance_id, source_path, zip_file_base):
+    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
+    run_ssm_command(instance_id, cmd)
+    return [f"/mnt/{zip_file_base}.tar.gz"]
+
+def upload_files_to_s3_via_ssm(instance_id, files, s3_bucket, s3_prefix):
+    results = []
+    for fpath in files:
+        fname = os.path.basename(fpath)
+        cmd = f"aws s3 cp {fpath} s3://{s3_bucket}/{s3_prefix}/{fname}"
+        try:
+            run_ssm_command(instance_id, cmd)
+            results.append(True)
+        except Exception as e:
+            logger.error(f"Failed to upload {fpath}: {e}")
+            results.append(False)
+    return results
+
+def download_and_extract_files(instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
+    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
+    files_str = run_ssm_command_and_get_output(instance_id, list_cmd)
+    files = files_str.strip().split('\n')
+
+    results = []
+    for fname in files:
+        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
+        local_file = f"/mnt/{fname}"
+        extract_cmd = f"""
+            aws s3 cp {s3_uri} {local_file} &&
+            mkdir -p {dest_path} &&
+            if [[ {fname} == *.tar.gz ]]; then
+                pigz -dc {local_file} | tar -xf - -C {dest_path};
+            else
+                cat {local_file} >> /mnt/{zip_file_base}.tar.gz;
+            fi
+        """
+        try:
+            run_ssm_command(instance_id, extract_cmd)
+            results.append(True)
+        except Exception as e:
+            logger.error(f"Download/extract failed for {fname}: {e}")
+            results.append(False)
+    return results
+
+def run_ssm_command_and_get_output(instance_id, command):
+    response = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': [command]},
+        TimeoutSeconds=1800,
+    )
+    command_id = response['Command']['CommandId']
+    for _ in range(60):
+        time.sleep(5)
+        output = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id
+        )
+        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+            if output['Status'] != 'Success':
+                raise Exception(output['StandardErrorContent'])
+            return output['StandardOutputContent']

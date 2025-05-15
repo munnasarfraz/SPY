@@ -1,357 +1,12 @@
 import boto3
 import time
 import concurrent.futures
-from datetime import datetime
- 
-ssm_client = boto3.client('ssm')
- 
- 
-def lambda_handler(event, context):
-    instance_source = event['source_instance']
-    instance_destination = event['target_instance']
-    s3_bucket = event['s3_bucket']
- 
-    # Create unique timestamp folder
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
- 
-    services = [
-        {
-            'name': 'servicefee_engine',
-            'source_path': event['source_path_servicefee'],
-            'destination_path': event['destination_path_servicefee'],
-            'zip_file_base': 'servicefee_backup'
-        }
-    ]
- 
-    results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for service in services:
-            futures.append(executor.submit(
-                process_transfer,
-                instance_source,
-                instance_destination,
-                service['source_path'],
-                service['destination_path'],
-                s3_bucket,
-                service['zip_file_base'],
-                service['name'],
-                timestamp
-            ))
- 
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
- 
-    # Print summary
-    for result in results:
-        print(f"{result['service']}: {result['status']} in {result['duration_seconds']} seconds")
- 
-    return {
-        'status': 'Success',
-        'message': f'All services transferred successfully at {timestamp}.',
-        'details': results
-    }
- 
- 
-def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
-    s3_prefix = f"temp/{timestamp}/{service_folder}"
-    zip_file_path = f"/mnt/{zip_file_base}.zip"
-    max_size_mb = 50
-    max_size_bytes = max_size_mb * 1024 * 1024
- 
-    start_time = time.time()
- 
-    compress_command = f"""
-        if [ ! -d "{source_path}" ] || [ -z "$(ls -A {source_path})" ]; then
-            echo "[{service_folder}] Directory is missing or empty. Skipping transfer."
-            exit 0
-        fi
-        
-        dir_size=$(du -sb {source_path} | cut -f1)
-        echo "[{service_folder}] Directory size: $dir_size bytes"
-        
-        cd {source_path}
-        
-        if [ $dir_size -gt {max_size_bytes} ]; then
-            echo "[{service_folder}] Splitting zip since size is $dir_size bytes"
-            zip -r -s 50m /mnt/{zip_file_base}.zip .
-        else
-            echo "[{service_folder}] Regular zip since size is $dir_size bytes"
-            zip -r /mnt/{zip_file_base}.zip .
-        fi
-        
-        echo "[{service_folder}] Listing zip parts in /mnt/"
-        ls -lh /mnt/{zip_file_base}.*
-        
-        aws s3 cp /mnt/ s3://{s3_bucket}/{s3_prefix}/ --recursive --exclude "*" --include "{zip_file_base}*.zip"
-        
-        # Cleanup
-        rm -f /mnt/{zip_file_base}.z* /mnt/{zip_file_base}.zip
-        """
-    print('#########compress_command : ', compress_command)
- 
-    extract_command = f"""
-        aws s3 cp s3://{s3_bucket}/{s3_prefix}/ /mnt/ --recursive --exclude "*" --include "{zip_file_base}*.zip
-        unzip -o /mnt/{zip_file_base}.zip -d {destination_path}
-        
-        # Cleanup
-        rm -f /mnt/{zip_file_base}.z* /mnt/{zip_file_base}.zip
-        """
-    print('##########extract_command : ', extract_command)
- 
-    try:
-        run_ssm_command(instance_source, compress_command)
- 
-        # After zip step, check if anything was uploaded to S3
-        s3 = boto3.client('s3')
-        result = s3.list_objects_v2(Bucket=s3_bucket, Prefix=f"{s3_prefix}/")
-        if 'Contents' not in result:
-            end_time = time.time()
-            duration = round(end_time - start_time, 2)
-            msg = f"[{service_folder}] No files to transfer. Source folder is empty or missing."
-            print(msg)
-            return {
-                'status': 'Skipped',
-                'service': service_folder,
-                'duration_seconds': duration,
-                'message': msg
-            }
- 
-        # If files were uploaded, continue with extraction
-        run_ssm_command(instance_destination, extract_command)
- 
-        end_time = time.time()
-        duration = round(end_time - start_time, 2)
-        print(f"[{service_folder}] Transfer completed in {duration} seconds.")
- 
-        return {
-            'status': 'Success',
-            'service': service_folder,
-            'duration_seconds': duration,
-            'message': f'{zip_file_base} transfer complete in {duration} seconds.'
-        }
- 
-    except Exception as e:
-        end_time = time.time()
-        duration = round(end_time - start_time, 2)
-        print(f"[{service_folder}] Transfer failed after {duration} seconds.")
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'duration_seconds': duration,
-            'message': str(e)
-        }
- 
- 
- 
-def run_ssm_command(instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
- 
-    command_id = response['Command']['CommandId']
- 
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id
-        )
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            print(f"[{instance_id}] STDOUT:\n{output['StandardOutputContent']}")
-            if output['Status'] != 'Success':
-                raise Exception(f"[{instance_id}] Command failed:\n{output['StandardErrorContent']}")
-            return
-
-
---------------------------------------------------------------
-import boto3
-import time
-import concurrent.futures
-from datetime import datetime
-
-# --- Configuration ---
-AWS_PROFILE = "my-sso-profile"  # Change this to your AWS SSO profile name
-
-# Create session using SSO profile
-session = boto3.Session(profile_name=AWS_PROFILE)
-
-# Clients
-ssm_client = session.client('ssm')
-s3_client = session.client('s3')
-
-
-def lambda_handler(event, context):
-    instance_source = event['source_instance']
-    instance_destination = event['target_instance']
-    s3_bucket = event['s3_bucket']
-
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-
-    services = [
-        {
-            'name': 'servicefee_engine',
-            'source_path': event['source_path_servicefee'],
-            'destination_path': event['destination_path_servicefee'],
-            'zip_file_base': 'servicefee_backup'
-        }
-    ]
-
-    results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for service in services:
-            futures.append(executor.submit(
-                process_transfer,
-                instance_source,
-                instance_destination,
-                service['source_path'],
-                service['destination_path'],
-                s3_bucket,
-                service['zip_file_base'],
-                service['name'],
-                timestamp
-            ))
-
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
-
-    # Summary
-    for result in results:
-        print(f"{result['service']}: {result['status']} in {result['duration_seconds']} seconds")
-
-    return {
-        'status': 'Success',
-        'message': f'All services transferred successfully at {timestamp}.',
-        'details': results
-    }
-
-
-def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
-    s3_prefix = f"temp/{timestamp}/{service_folder}"
-    max_size_mb = 50
-    max_size_bytes = max_size_mb * 1024 * 1024
-    start_time = time.time()
-
-    zip_file_path = f"/mnt/{zip_file_base}.zip"
-
-    compress_command = f"""
-        if [ ! -d "{source_path}" ] || [ -z "$(ls -A {source_path})" ]; then
-            echo "[{service_folder}] Directory is missing or empty. Skipping transfer."
-            exit 0
-        fi
-
-        dir_size=$(du -sb {source_path} | cut -f1)
-        echo "[{service_folder}] Directory size: $dir_size bytes"
-
-        cd {source_path}
-
-        if [ $dir_size -gt {max_size_bytes} ]; then
-            echo "[{service_folder}] Splitting zip since size is $dir_size bytes"
-            zip -r -s 50m {zip_file_path} .
-        else
-            echo "[{service_folder}] Regular zip since size is $dir_size bytes"
-            zip -r {zip_file_path} .
-        fi
-
-        echo "[{service_folder}] Listing zip parts in /mnt/"
-        ls -lh /mnt/{zip_file_base}.*
-
-        aws s3 cp /mnt/ s3://{s3_bucket}/{s3_prefix}/ --recursive --exclude "*" --include "{zip_file_base}*.zip"
-
-        rm -f /mnt/{zip_file_base}.z* /mnt/{zip_file_base}.zip
-    """
-
-    extract_command = f"""
-        aws s3 cp s3://{s3_bucket}/{s3_prefix}/ /mnt/ --recursive --exclude "*" --include "{zip_file_base}*.zip"
-        unzip -o /mnt/{zip_file_base}.zip -d {destination_path}
-        rm -f /mnt/{zip_file_base}.z* /mnt/{zip_file_base}.zip
-    """
-
-    try:
-        run_ssm_command(instance_source, compress_command)
-
-        # Check if anything was uploaded to S3
-        result = s3_client.list_objects_v2(Bucket=s3_bucket, Prefix=f"{s3_prefix}/")
-        if 'Contents' not in result:
-            duration = round(time.time() - start_time, 2)
-            msg = f"[{service_folder}] No files to transfer. Source folder is empty or missing."
-            print(msg)
-            return {
-                'status': 'Skipped',
-                'service': service_folder,
-                'duration_seconds': duration,
-                'message': msg
-            }
-
-        run_ssm_command(instance_destination, extract_command)
-        duration = round(time.time() - start_time, 2)
-        return {
-            'status': 'Success',
-            'service': service_folder,
-            'duration_seconds': duration,
-            'message': f"{zip_file_base} transfer complete in {duration} seconds."
-        }
-
-    except Exception as e:
-        duration = round(time.time() - start_time, 2)
-        print(f"[{service_folder}] Transfer failed after {duration} seconds: {e}")
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'duration_seconds': duration,
-            'message': str(e)
-        }
-
-
-def run_ssm_command(instance_id, command):
-    print(f"[{instance_id}] Executing SSM command...")
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-
-    command_id = response['Command']['CommandId']
-
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id
-        )
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            print(f"[{instance_id}] STDOUT:\n{output['StandardOutputContent']}")
-            if output['Status'] != 'Success':
-                raise Exception(f"[{instance_id}] Command failed:\n{output['StandardErrorContent']}")
-            return
-
-
-# --- Run Locally ---
-if __name__ == "__main__":
-    test_event = {
-        "source_instance": "i-0example123source",  # Replace with your source EC2 instance ID
-        "target_instance": "i-0example456target",  # Replace with your target EC2 instance ID
-        "s3_bucket": "your-s3-bucket-name",        # Replace with your S3 bucket
-        "source_path_servicefee": "/home/ec2-user/data",         # Path on source EC2
-        "destination_path_servicefee": "/home/ec2-user/restore"  # Path on destination EC2
-    }
-
-    lambda_handler(test_event, None)
-=========================================================================
-import boto3
-import time
-import concurrent.futures
 import logging
 import os
 from datetime import datetime
 
 # --- Configuration ---
-AWS_PROFILE = "my-sso-profile"  # Change this to your AWS SSO profile name
+AWS_PROFILE = "ppj"  # Change this to your AWS SSO profile name
 
 SPLIT_ON = 2 * 1024 * 1024 * 1024  # 2 GB
 SPLIT_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
@@ -417,93 +72,99 @@ def process_transfer(instance_source, instance_destination, source_path, destina
     s3_prefix = f"temp/{timestamp}/{service_folder}"
     start_time = time.time()
 
-    # Calculate the directory size
-    dir_size = get_directory_size(source_path)
+    # Step 1: Get directory size on source EC2
+    dir_size = get_directory_size_via_ssm(instance_source, source_path)
     logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
 
-    # Check if the directory needs splitting
-    split_files = []
+    # Step 2: Split on EC2 if needed
     if dir_size > SPLIT_ON:
-        # Split the files into 1GB chunks
-        logger.info(f"[{service_folder}] Directory size exceeds {SPLIT_ON} bytes, splitting files.")
-        split_files = split_directory(source_path, zip_file_base)
+        logger.info(f"[{service_folder}] Directory size exceeds {SPLIT_ON}, splitting on EC2.")
+        split_files = split_directory_via_ssm(instance_source, source_path, zip_file_base)
     else:
-        split_files = [source_path]
+        logger.info(f"[{service_folder}] Directory size within limit. Zipping single archive.")
+        split_files = compress_directory_via_ssm(instance_source, source_path, zip_file_base)
 
-    # Ensure part creation is completed before proceeding with upload
     if not split_files:
-        logger.error(f"[{service_folder}] No split files were created. Skipping upload.")
+        logger.error(f"[{service_folder}] No archive/split files were created.")
         return {
             'status': 'Error',
             'service': service_folder,
-            'message': f"Failed to create split parts for {service_folder}."
+            'message': f"Failed to create archive for {service_folder}."
         }
 
-    # Upload files to S3 using parallel execution, but wait for all uploads to finish before starting downloads
-    upload_results = upload_files_to_s3(split_files, s3_bucket, s3_prefix, zip_file_base)
-    
-    # If any upload failed, do not proceed with download
+    # Step 3: Upload split files to S3 from EC2
+    upload_results = upload_files_to_s3_via_ssm(instance_source, split_files, s3_bucket, s3_prefix)
     if not all(upload_results):
-        logger.error(f"[{service_folder}] Upload failed. Aborting download.")
+        logger.error(f"[{service_folder}] Upload failed. Aborting.")
         return {
             'status': 'Error',
             'service': service_folder,
-            'message': f"Failed to upload parts for {service_folder}."
+            'message': f"Upload to S3 failed for {service_folder}."
         }
 
-    # After all uploads are confirmed successful, download and extract files in parallel
+    # Step 4: Download and extract on destination EC2
     download_results = download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path)
 
     duration = round(time.time() - start_time, 2)
-    if all(download_results):
-        return {
-            'status': 'Success',
-            'service': service_folder,
-            'duration_seconds': duration,
-            'message': f"{zip_file_base} transfer complete in {duration} seconds."
-        }
-    else:
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'duration_seconds': duration,
-            'message': f"Error occurred in {service_folder} transfer."
-        }
+    status = "Success" if all(download_results) else "Error"
+    return {
+        'status': status,
+        'service': service_folder,
+        'duration_seconds': duration,
+        'message': f"{service_folder} transfer completed with status: {status}."
+    }
 
+def run_ssm_command_and_get_output(instance_id, command):
+    response = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': [command]},
+        TimeoutSeconds=1800,
+    )
+    command_id = response['Command']['CommandId']
+    for _ in range(60):
+        time.sleep(5)
+        output = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id
+        )
+        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+            if output['Status'] != 'Success':
+                raise Exception(output['StandardErrorContent'])
+            return output['StandardOutputContent']
+        
+def get_directory_size_via_ssm(instance_id, source_path):
+    cmd = f"du -sb {source_path} | cut -f1"
+    output = run_ssm_command_and_get_output(instance_id, cmd)
+    return int(output.strip())
 
-def get_directory_size(directory):
-    # Get total size of a directory
-    total_size = 0
-    for dirpath, dirnames, filenames in os.walk(directory):
-        for file in filenames:
-            filepath = os.path.join(dirpath, file)
-            total_size += os.path.getsize(filepath)
-    return total_size
+def split_directory_via_ssm(instance_id, source_path, zip_file_base):
+    cmd = (
+        f"cd {source_path} && "
+        f"tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
+    )
+    run_ssm_command(instance_id, cmd)
+    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
+    output = run_ssm_command_and_get_output(instance_id, list_cmd)
+    return output.strip().split('\n')
 
+def compress_directory_via_ssm(instance_id, source_path, zip_file_base):
+    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
+    run_ssm_command(instance_id, cmd)
+    return [f"/mnt/{zip_file_base}.tar.gz"]
 
-def split_directory(source_path, zip_file_base):
-    # Split the source directory into parts using pigz
-    split_files = []
-    split_command = f"pigz -p 4 -c {source_path} | split -b {SPLIT_SIZE} - {zip_file_base}.part."
-    logger.info(f"Executing split command: {split_command}")
-    os.system(split_command)  # Runs the command on local environment
-    # List created split files
-    for file in os.listdir('/mnt/'):
-        if file.startswith(zip_file_base):
-            split_files.append(f"/mnt/{file}")
-    return split_files
-
-
-def upload_files_to_s3(files, s3_bucket, s3_prefix, zip_file_base):
-    # Upload files to S3 using parallel execution
-    upload_results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for file in files:
-            futures.append(executor.submit(upload_file, file, s3_bucket, s3_prefix, zip_file_base))
-        for future in concurrent.futures.as_completed(futures):
-            upload_results.append(future.result())
-    return upload_results
+def upload_files_to_s3_via_ssm(instance_id, files, s3_bucket, s3_prefix):
+    results = []
+    for fpath in files:
+        fname = os.path.basename(fpath)
+        cmd = f"aws s3 cp {fpath} s3://{s3_bucket}/{s3_prefix}/{fname}"
+        try:
+            run_ssm_command(instance_id, cmd)
+            results.append(True)
+        except Exception as e:
+            logger.error(f"Failed to upload {fpath}: {e}")
+            results.append(False)
+    return results
 
 
 def upload_file(file, s3_bucket, s3_prefix, zip_file_base):
@@ -516,17 +177,32 @@ def upload_file(file, s3_bucket, s3_prefix, zip_file_base):
         return False
 
 
-def download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path):
-    # Download and extract files from S3
-    download_results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for part_number in range(1, len(os.listdir('/mnt/')) + 1):
-            file_name = f"{zip_file_base}.part.{part_number}"
-            futures.append(executor.submit(download_file, file_name, s3_bucket, s3_prefix, instance_destination, destination_path))
-        for future in concurrent.futures.as_completed(futures):
-            download_results.append(future.result())
-    return download_results
+def download_and_extract_files(instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
+    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
+    files_str = run_ssm_command_and_get_output(instance_id, list_cmd)
+    files = files_str.strip().split('\n')
+
+    results = []
+    for fname in files:
+        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
+        local_file = f"/mnt/{fname}"
+        extract_cmd = f"""
+            aws s3 cp {s3_uri} {local_file} &&
+            mkdir -p {dest_path} &&
+            if [[ {fname} == *.tar.gz ]]; then
+                pigz -dc {local_file} | tar -xf - -C {dest_path};
+            else
+                cat {local_file} >> /mnt/{zip_file_base}.tar.gz;
+            fi
+        """
+        try:
+            run_ssm_command(instance_id, extract_cmd)
+            results.append(True)
+        except Exception as e:
+            logger.error(f"Download/extract failed for {fname}: {e}")
+            results.append(False)
+    return results
+
 
 
 def download_file(file_name, s3_bucket, s3_prefix, instance_destination, destination_path):
@@ -570,139 +246,14 @@ def run_ssm_command(instance_id, command):
 
 # --- Run Locally ---
 if __name__ == "__main__":
-    test_event = {
-        "source_instance": "i-0example123source",  # Replace with your source EC2 instance ID
-        "target_instance": "i-0example456target",  # Replace with your target EC2 instance ID
-        "s3_bucket": "your-s3-bucket-name",        # Replace with your S3 bucket
-        "source_path_servicefee": "/home/ec2-user/data",         # Path on source EC2
-        "destination_path_servicefee": "/home/ec2-user/restore"  # Path on destination EC2
+    test_event = test_event = {
+        "source_instance": "i-057d31b7dfd13887d", # Replace with your source EC2 instance ID
+        "target_instance": "i-0c78349dfdd100a79",  # Replace with your target EC2 instance ID
+        "source_path_journey": "/opt/atpco/engine/db/neo4j/journey/all",
+        "destination_path_journey": "/opt/atpco/engine/db/neo4j/chgdetroutings/Routings_tmp",
+        "source_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
+        "destination_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
+        "s3_bucket": "ppj-transfer-bucket"
     }
 
     lambda_handler(test_event, None)
-
-
-
->>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
-    s3_prefix = f"temp/{timestamp}/{service_folder}"
-    start_time = time.time()
-
-    # Step 1: Get directory size on source EC2
-    dir_size = get_directory_size_via_ssm(instance_source, source_path)
-    logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
-
-    # Step 2: Split on EC2 if needed
-    if dir_size > SPLIT_ON:
-        logger.info(f"[{service_folder}] Directory size exceeds {SPLIT_ON}, splitting on EC2.")
-        split_files = split_directory_via_ssm(instance_source, source_path, zip_file_base)
-    else:
-        logger.info(f"[{service_folder}] Directory size within limit. Zipping single archive.")
-        split_files = compress_directory_via_ssm(instance_source, source_path, zip_file_base)
-
-    if not split_files:
-        logger.error(f"[{service_folder}] No archive/split files were created.")
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'message': f"Failed to create archive for {service_folder}."
-        }
-
-    # Step 3: Upload split files to S3 from EC2
-    upload_results = upload_files_to_s3_via_ssm(instance_source, split_files, s3_bucket, s3_prefix)
-    if not all(upload_results):
-        logger.error(f"[{service_folder}] Upload failed. Aborting.")
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'message': f"Upload to S3 failed for {service_folder}."
-        }
-
-    # Step 4: Download and extract on destination EC2
-    download_results = download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path)
-
-    duration = round(time.time() - start_time, 2)
-    status = "Success" if all(download_results) else "Error"
-    return {
-        'status': status,
-        'service': service_folder,
-        'duration_seconds': duration,
-        'message': f"{service_folder} transfer completed with status: {status}."
-    }
-
-def get_directory_size_via_ssm(instance_id, source_path):
-    cmd = f"du -sb {source_path} | cut -f1"
-    output = run_ssm_command_and_get_output(instance_id, cmd)
-    return int(output.strip())
-
-def split_directory_via_ssm(instance_id, source_path, zip_file_base):
-    cmd = (
-        f"cd {source_path} && "
-        f"tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
-    )
-    run_ssm_command(instance_id, cmd)
-    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
-    output = run_ssm_command_and_get_output(instance_id, list_cmd)
-    return output.strip().split('\n')
-
-def compress_directory_via_ssm(instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
-    run_ssm_command(instance_id, cmd)
-    return [f"/mnt/{zip_file_base}.tar.gz"]
-
-def upload_files_to_s3_via_ssm(instance_id, files, s3_bucket, s3_prefix):
-    results = []
-    for fpath in files:
-        fname = os.path.basename(fpath)
-        cmd = f"aws s3 cp {fpath} s3://{s3_bucket}/{s3_prefix}/{fname}"
-        try:
-            run_ssm_command(instance_id, cmd)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Failed to upload {fpath}: {e}")
-            results.append(False)
-    return results
-
-def download_and_extract_files(instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
-    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
-    files_str = run_ssm_command_and_get_output(instance_id, list_cmd)
-    files = files_str.strip().split('\n')
-
-    results = []
-    for fname in files:
-        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
-        local_file = f"/mnt/{fname}"
-        extract_cmd = f"""
-            aws s3 cp {s3_uri} {local_file} &&
-            mkdir -p {dest_path} &&
-            if [[ {fname} == *.tar.gz ]]; then
-                pigz -dc {local_file} | tar -xf - -C {dest_path};
-            else
-                cat {local_file} >> /mnt/{zip_file_base}.tar.gz;
-            fi
-        """
-        try:
-            run_ssm_command(instance_id, extract_cmd)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Download/extract failed for {fname}: {e}")
-            results.append(False)
-    return results
-
-def run_ssm_command_and_get_output(instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id
-        )
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return output['StandardOutputContent']

@@ -257,3 +257,205 @@ if __name__ == "__main__":
     }
 
     lambda_handler(test_event, None)
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+import boto3
+import time
+import concurrent.futures
+import logging
+import os
+from datetime import datetime
+
+# --- Configuration ---
+AWS_PROFILE = "ppj"
+SPLIT_ON = 2 * 1024 * 1024 * 1024  # 2 GB
+SPLIT_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
+bucket_upload = True  # Set False if SSH was available — but keep True in SSM-only setup
+
+# Setup AWS session
+session = boto3.Session(profile_name=AWS_PROFILE)
+ssm_client = session.client('ssm')
+s3_client = session.client('s3')
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- Lambda Handler ---
+def lambda_handler(event, context):
+    instance_source = event['source_instance']
+    instance_destination = event['target_instance']
+    s3_bucket = event['s3_bucket']
+    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+
+    services = [
+        {
+            'name': 'servicefee_engine',
+            'source_path': event['source_path_servicefee'],
+            'destination_path': event['destination_path_servicefee'],
+            'zip_file_base': 'servicefee_backup'
+        }
+    ]
+
+    results = []
+    for service in services:
+        result = process_transfer(
+            instance_source,
+            instance_destination,
+            service['source_path'],
+            service['destination_path'],
+            s3_bucket,
+            service['zip_file_base'],
+            service['name'],
+            timestamp
+        )
+        results.append(result)
+
+    for result in results:
+        logger.info(f"{result['service']}: {result['status']} in {result.get('duration_seconds', 0)}s")
+
+    return {
+        'status': 'Success',
+        'message': f'Transfer finished at {timestamp}',
+        'details': results
+    }
+
+# --- Transfer Logic ---
+def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
+    if source_path != destination_path:
+        return {'status': 'Error', 'service': service_folder, 'message': 'Source and destination paths must match'}
+
+    start_time = time.time()
+    s3_prefix = f"temp/{timestamp}/{service_folder}"
+
+    dir_size = get_directory_size_via_ssm(instance_source, source_path)
+    logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
+
+    if dir_size > SPLIT_ON:
+        split_files = split_directory_via_ssm(instance_source, source_path, zip_file_base)
+    else:
+        split_files = compress_directory_via_ssm(instance_source, source_path, zip_file_base)
+
+    if not split_files:
+        return {'status': 'Error', 'service': service_folder, 'message': 'No archive created'}
+
+    if bucket_upload:
+        upload_results = [upload_file_to_s3_via_ssm(instance_source, f, s3_bucket, s3_prefix) for f in split_files]
+        if not all(upload_results):
+            return {'status': 'Error', 'service': service_folder, 'message': 'Upload failed'}
+        download_results = download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path)
+    else:
+        return {'status': 'Error', 'service': service_folder, 'message': 'bucket_upload=False is not supported without SSH'}
+
+    duration = round(time.time() - start_time, 2)
+    return {
+        'status': 'Success' if all(download_results) else 'Error',
+        'service': service_folder,
+        'duration_seconds': duration,
+        'message': f"{service_folder} transfer completed."
+    }
+
+# --- Core SSM Helpers ---
+def run_ssm_command_and_get_output(instance_id, command):
+    response = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': [command]},
+        TimeoutSeconds=1800,
+    )
+    command_id = response['Command']['CommandId']
+    for _ in range(60):
+        time.sleep(5)
+        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+            if output['Status'] != 'Success':
+                raise Exception(output['StandardErrorContent'])
+            return output['StandardOutputContent']
+
+def run_ssm_command(instance_id, command):
+    response = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': [command]},
+        TimeoutSeconds=1800,
+    )
+    command_id = response['Command']['CommandId']
+    for _ in range(60):
+        time.sleep(5)
+        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+            if output['Status'] != 'Success':
+                raise Exception(output['StandardErrorContent'])
+            return
+
+# --- File Operations via SSM ---
+def get_directory_size_via_ssm(instance_id, source_path):
+    cmd = f"du -sb {source_path} | cut -f1"
+    output = run_ssm_command_and_get_output(instance_id, cmd)
+    return int(output.strip())
+
+def split_directory_via_ssm(instance_id, source_path, zip_file_base):
+    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
+    run_ssm_command(instance_id, cmd)
+    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
+    output = run_ssm_command_and_get_output(instance_id, list_cmd)
+    return output.strip().split('\n')
+
+def compress_directory_via_ssm(instance_id, source_path, zip_file_base):
+    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
+    run_ssm_command(instance_id, cmd)
+    return [f"/mnt/{zip_file_base}.tar.gz"]
+
+def upload_file_to_s3_via_ssm(instance_id, file_path, s3_bucket, s3_prefix):
+    fname = os.path.basename(file_path)
+    cmd = f"aws s3 cp {file_path} s3://{s3_bucket}/{s3_prefix}/{fname}"
+    try:
+        run_ssm_command(instance_id, cmd)
+        logger.info(f"Uploaded {fname} to s3://{s3_bucket}/{s3_prefix}/")
+        return True
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        return False
+
+def download_and_extract_files(instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
+    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
+    files_str = run_ssm_command_and_get_output(instance_id, list_cmd)
+    files = files_str.strip().split('\n')
+    results = []
+
+    for fname in files:
+        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
+        local_file = f"/mnt/{fname}"
+        if fname.endswith('.tar.gz'):
+            cmd = f"aws s3 cp {s3_uri} {local_file} && mkdir -p {dest_path} && pigz -dc {local_file} | tar -xf - -C {dest_path}"
+        else:
+            cmd = f"aws s3 cp {s3_uri} {local_file} && cat {local_file} >> /mnt/{zip_file_base}.tar.gz"
+        try:
+            run_ssm_command(instance_id, cmd)
+            results.append(True)
+        except Exception as e:
+            logger.error(f"Download/extract failed for {fname}: {e}")
+            results.append(False)
+
+    # Extract after concat
+    if any(f.endswith('.part.') for f in files):
+        try:
+            extract_final = f"mkdir -p {dest_path} && pigz -dc /mnt/{zip_file_base}.tar.gz | tar -xf - -C {dest_path}"
+            run_ssm_command(instance_id, extract_final)
+            results.append(True)
+        except Exception as e:
+            logger.error(f"Final extract failed: {e}")
+            results.append(False)
+
+    return results
+
+# --- Run Locally for Test ---
+if __name__ == "__main__":
+    test_event = {
+        "source_instance": "i-057d31b7dfd13887d",
+        "target_instance": "i-0c78349dfdd100a79",
+        "source_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
+        "destination_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
+        "s3_bucket": "ppj-transfer-bucket"
+    }
+
+    lambda_handler(test_event, None)

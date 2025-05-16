@@ -1,3 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowListAndGetBucketLocation",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::985663031727:role/DevAdmin-Dev"
+      },
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::db_refresh"
+    },
+    {
+      "Sid": "AllowObjectActions",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::985663031727:role/DevAdmin-Dev"
+      },
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:CreateMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::db_refresh/*"
+    }
+  ]
+}
+
+
 import boto3
 import time
 import concurrent.futures

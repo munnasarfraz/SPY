@@ -983,5 +983,28 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
     except Exception as e:
         logger.error(f"Failed to download/extract for {zip_file_base}: {e}")
         return [False]
-
+JSONNNNNNNNNNNNNNNNNNNNNNNNN
+if __name__ == "__main__":
+    test_event = {
+        "services": [
+            {
+                "enabled": True,
+                "name": "test-service",
+                "source": {
+                    "environment": "dev-profile",
+                    "instanceId": "i-0123456789abcdef0",
+                    "path": "/data/source"
+                },
+                "destinations": [
+                    {
+                        "environment": "prod-profile",
+                        "instanceId": "i-0abcdef1234567890",
+                        "path": "/data/destination"
+                    }
+                ]
+            }
+        ],
+        "s3Bucket": "your-s3-bucket-name",
+        "dryRun": True  # or False
+    }
  

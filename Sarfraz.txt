@@ -1007,4 +1007,51 @@ if __name__ == "__main__":
         "s3Bucket": "your-s3-bucket-name",
         "dryRun": True  # or False
     }
- 
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowENGUAccountToUpload",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::985663031727:role/DevAdmin-Dev"
+      },
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:CreateMultipartUpload",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::db_refresh",
+        "arn:aws:s3:::db_refresh/*"
+      ]
+    }
+  ]
+}
+
+
+
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UploadToCrossAccountBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:CreateMultipartUpload",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::db_refresh",
+        "arn:aws:s3:::db_refresh/*"
+      ]
+    }
+  ]
+}

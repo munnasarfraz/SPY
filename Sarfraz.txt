@@ -440,3 +440,84 @@ def lambda_handler(event, context):
         'original_event': event
     }
 
+/////////////////////
+{
+  "status": "Success",
+  "message": "Transfer finished at 20250520-143515",
+  "services": [
+    {
+      "enabled": false,
+      "name": "journey",
+      "source": {
+        "environment": "ppj",
+        "instanceId": "i-057d31b7dfd13887d",
+        "path": "/opt/atpco/engine/db/neo4j/journey/all"
+      },
+      "destinations": [
+        {
+          "environment": "ppj",
+          "instanceId": "i-057d31b7dfd13887d",
+          "path": "/opt/atpco/engine/db/neo4j/journey/all_1"
+        }
+      ],
+      "status": "Skipped",
+      "message": "Service disabled",
+      "duration_seconds": 0
+    },
+    {
+      "enabled": true,
+      "name": "servicefee",
+      "source": {
+        "environment": "ppj",
+        "instanceId": "i-057d31b7dfd13887d",
+        "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp"
+      },
+      "destinations": [
+        {
+          "environment": "ppj",
+          "instanceId": "i-057d31b7dfd13887d",
+          "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
+        }
+      ],
+      "upload_result": {
+        "status": "Success",
+        "service": "servicefee",
+        "message": "Upload completed",
+        "duration_seconds": 143.38631343841553
+      },
+      "download_results": [
+        {
+          "environment": "ppj",
+          "instanceId": "i-057d31b7dfd13887d",
+          "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1",
+          "status": "Success",
+          "service": "servicefee",
+          "message": "Download and extraction completed for servicefee",
+          "duration_seconds": 138.41590118408203
+        }
+      ],
+      "duration_seconds": 282.2965531349182,
+      "status": "Success",
+      "message": "Transfer completed"
+    },
+    {
+      "enabled": false,
+      "name": "journey1",
+      "source": {
+        "environment": "engu",
+        "instanceId": "i-0703c925af9018ad3",
+        "path": "/opt/atpco/engine/db/neo4j/chgdetroutings/Routings"
+      },
+      "destinations": [
+        {
+          "environment": "ppj",
+          "instanceId": "i-057d31b7dfd13887d",
+          "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
+        }
+      ],
+      "status": "Skipped",
+      "message": "Service disabled",
+      "duration_seconds": 0
+    }
+  ]
+}

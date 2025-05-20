@@ -1,757 +1,3 @@
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowListAndGetBucketLocation",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::985663031727:role/DevAdmin-Dev"
-      },
-      "Action": [
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": "arn:aws:s3:::db_refresh"
-    },
-    {
-      "Sid": "AllowObjectActions",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::985663031727:role/DevAdmin-Dev"
-      },
-      "Action": [
-        "s3:PutObject",
-        "s3:PutObjectAcl",
-        "s3:CreateMultipartUpload"
-      ],
-      "Resource": "arn:aws:s3:::db_refresh/*"
-    }
-  ]
-}
-
-
-import boto3
-import time
-import concurrent.futures
-import logging
-import os
-from datetime import datetime
-
-# --- Configuration ---
-AWS_PROFILE = "ppj"  # Change this to your AWS SSO profile name
-
-SPLIT_ON = 2 * 1024 * 1024 * 1024  # 2 GB
-SPLIT_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
-
-# Create session using SSO profile
-session = boto3.Session(profile_name=AWS_PROFILE)
-
-# Clients
-ssm_client = session.client('ssm')
-s3_client = session.client('s3')
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def lambda_handler(event, context):
-    instance_source = event['source_instance']
-    instance_destination = event['target_instance']
-    s3_bucket = event['s3_bucket']
-
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-
-    services = [
-        {
-            'name': 'servicefee_engine',
-            'source_path': event['source_path_servicefee'],
-            'destination_path': event['destination_path_servicefee'],
-            'zip_file_base': 'servicefee_backup'
-        }
-    ]
-
-    results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for service in services:
-            futures.append(executor.submit(
-                process_transfer,
-                instance_source,
-                instance_destination,
-                service['source_path'],
-                service['destination_path'],
-                s3_bucket,
-                service['zip_file_base'],
-                service['name'],
-                timestamp
-            ))
-
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
-
-    # Summary
-    for result in results:
-        logger.info(f"{result['service']}: {result['status']} in {result['duration_seconds']} seconds")
-
-    return {
-        'status': 'Success',
-        'message': f'All services transferred successfully at {timestamp}.',
-        'details': results
-    }
-
-
-def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
-    s3_prefix = f"temp/{timestamp}/{service_folder}"
-    start_time = time.time()
-
-    # Step 1: Get directory size on source EC2
-    dir_size = get_directory_size_via_ssm(instance_source, source_path)
-    logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
-
-    # Step 2: Split on EC2 if needed
-    if dir_size > SPLIT_ON:
-        logger.info(f"[{service_folder}] Directory size exceeds {SPLIT_ON}, splitting on EC2.")
-        split_files = split_directory_via_ssm(instance_source, source_path, zip_file_base)
-    else:
-        logger.info(f"[{service_folder}] Directory size within limit. Zipping single archive.")
-        split_files = compress_directory_via_ssm(instance_source, source_path, zip_file_base)
-
-    if not split_files:
-        logger.error(f"[{service_folder}] No archive/split files were created.")
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'message': f"Failed to create archive for {service_folder}."
-        }
-
-    # Step 3: Upload split files to S3 from EC2
-    upload_results = upload_files_to_s3_via_ssm(instance_source, split_files, s3_bucket, s3_prefix)
-    if not all(upload_results):
-        logger.error(f"[{service_folder}] Upload failed. Aborting.")
-        return {
-            'status': 'Error',
-            'service': service_folder,
-            'message': f"Upload to S3 failed for {service_folder}."
-        }
-
-    # Step 4: Download and extract on destination EC2
-    download_results = download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path)
-
-    duration = round(time.time() - start_time, 2)
-    status = "Success" if all(download_results) else "Error"
-    return {
-        'status': status,
-        'service': service_folder,
-        'duration_seconds': duration,
-        'message': f"{service_folder} transfer completed with status: {status}."
-    }
-
-def run_ssm_command_and_get_output(instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id
-        )
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return output['StandardOutputContent']
-        
-def get_directory_size_via_ssm(instance_id, source_path):
-    cmd = f"du -sb {source_path} | cut -f1"
-    output = run_ssm_command_and_get_output(instance_id, cmd)
-    return int(output.strip())
-
-def split_directory_via_ssm(instance_id, source_path, zip_file_base):
-    cmd = (
-        f"cd {source_path} && "
-        f"tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
-    )
-    run_ssm_command(instance_id, cmd)
-    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
-    output = run_ssm_command_and_get_output(instance_id, list_cmd)
-    return output.strip().split('\n')
-
-def compress_directory_via_ssm(instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
-    run_ssm_command(instance_id, cmd)
-    return [f"/mnt/{zip_file_base}.tar.gz"]
-
-def upload_files_to_s3_via_ssm(instance_id, files, s3_bucket, s3_prefix):
-    results = []
-    for fpath in files:
-        fname = os.path.basename(fpath)
-        cmd = f"aws s3 cp {fpath} s3://{s3_bucket}/{s3_prefix}/{fname}"
-        try:
-            run_ssm_command(instance_id, cmd)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Failed to upload {fpath}: {e}")
-            results.append(False)
-    return results
-
-
-def upload_file(file, s3_bucket, s3_prefix, zip_file_base):
-    try:
-        s3_client.upload_file(file, s3_bucket, f"{s3_prefix}/{os.path.basename(file)}")
-        logger.info(f"Uploaded {file} to S3")
-        return True
-    except Exception as e:
-        logger.error(f"Error uploading {file}: {e}")
-        return False
-
-
-def download_and_extract_files(instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
-    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
-    files_str = run_ssm_command_and_get_output(instance_id, list_cmd)
-    files = files_str.strip().split('\n')
-
-    results = []
-    for fname in files:
-        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
-        local_file = f"/mnt/{fname}"
-        extract_cmd = f"""
-            aws s3 cp {s3_uri} {local_file} &&
-            mkdir -p {dest_path} &&
-            if [[ {fname} == *.tar.gz ]]; then
-                pigz -dc {local_file} | tar -xf - -C {dest_path};
-            else
-                cat {local_file} >> /mnt/{zip_file_base}.tar.gz;
-            fi
-        """
-        try:
-            run_ssm_command(instance_id, extract_cmd)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Download/extract failed for {fname}: {e}")
-            results.append(False)
-    return results
-
-
-
-def download_file(file_name, s3_bucket, s3_prefix, instance_destination, destination_path):
-    # Download file from S3 to instance and extract
-    download_command = f"""
-        aws s3 cp s3://{s3_bucket}/{s3_prefix}/{file_name} /mnt/
-        pigz -d /mnt/{file_name} -c > {destination_path}/{file_name.replace(".gz", "")}
-    """
-    try:
-        run_ssm_command(instance_destination, download_command)
-        logger.info(f"Downloaded and extracted {file_name}")
-        return True
-    except Exception as e:
-        logger.error(f"Error downloading {file_name}: {e}")
-        return False
-
-
-def run_ssm_command(instance_id, command):
-    logger.info(f"[{instance_id}] Executing SSM command...")
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-
-    command_id = response['Command']['CommandId']
-
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id
-        )
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            logger.info(f"[{instance_id}] STDOUT:\n{output['StandardOutputContent']}")
-            if output['Status'] != 'Success':
-                raise Exception(f"[{instance_id}] Command failed:\n{output['StandardErrorContent']}")
-            return
-
-
-# --- Run Locally ---
-if __name__ == "__main__":
-    test_event = test_event = {
-        "source_instance": "i-057d31b7dfd13887d", # Replace with your source EC2 instance ID
-        "target_instance": "i-0c78349dfdd100a79",  # Replace with your target EC2 instance ID
-        "source_path_journey": "/opt/atpco/engine/db/neo4j/journey/all",
-        "destination_path_journey": "/opt/atpco/engine/db/neo4j/chgdetroutings/Routings_tmp",
-        "source_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
-        "destination_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
-        "s3_bucket": "ppj-transfer-bucket"
-    }
-
-    lambda_handler(test_event, None)
->>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-import boto3
-import time
-import concurrent.futures
-import logging
-import os
-from datetime import datetime
-
-# --- Configuration ---
-AWS_PROFILE = "ppj"
-SPLIT_ON = 2 * 1024 * 1024 * 1024  # 2 GB
-SPLIT_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
-bucket_upload = True  # Set False if SSH was available — but keep True in SSM-only setup
-
-# Setup AWS session
-session = boto3.Session(profile_name=AWS_PROFILE)
-ssm_client = session.client('ssm')
-s3_client = session.client('s3')
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- Lambda Handler ---
-def lambda_handler(event, context):
-    instance_source = event['source_instance']
-    instance_destination = event['target_instance']
-    s3_bucket = event['s3_bucket']
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-
-    services = [
-        {
-            'name': 'servicefee_engine',
-            'source_path': event['source_path_servicefee'],
-            'destination_path': event['destination_path_servicefee'],
-            'zip_file_base': 'servicefee_backup'
-        }
-    ]
-
-    results = []
-    for service in services:
-        result = process_transfer(
-            instance_source,
-            instance_destination,
-            service['source_path'],
-            service['destination_path'],
-            s3_bucket,
-            service['zip_file_base'],
-            service['name'],
-            timestamp
-        )
-        results.append(result)
-
-    for result in results:
-        logger.info(f"{result['service']}: {result['status']} in {result.get('duration_seconds', 0)}s")
-
-    return {
-        'status': 'Success',
-        'message': f'Transfer finished at {timestamp}',
-        'details': results
-    }
-
-# --- Transfer Logic ---
-def process_transfer(instance_source, instance_destination, source_path, destination_path, s3_bucket, zip_file_base, service_folder, timestamp):
-    if source_path != destination_path:
-        return {'status': 'Error', 'service': service_folder, 'message': 'Source and destination paths must match'}
-
-    start_time = time.time()
-    s3_prefix = f"temp/{timestamp}/{service_folder}"
-
-    dir_size = get_directory_size_via_ssm(instance_source, source_path)
-    logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
-
-    if dir_size > SPLIT_ON:
-        split_files = split_directory_via_ssm(instance_source, source_path, zip_file_base)
-    else:
-        split_files = compress_directory_via_ssm(instance_source, source_path, zip_file_base)
-
-    if not split_files:
-        return {'status': 'Error', 'service': service_folder, 'message': 'No archive created'}
-
-    if bucket_upload:
-        upload_results = [upload_file_to_s3_via_ssm(instance_source, f, s3_bucket, s3_prefix) for f in split_files]
-        if not all(upload_results):
-            return {'status': 'Error', 'service': service_folder, 'message': 'Upload failed'}
-        download_results = download_and_extract_files(instance_destination, s3_bucket, s3_prefix, zip_file_base, destination_path)
-    else:
-        return {'status': 'Error', 'service': service_folder, 'message': 'bucket_upload=False is not supported without SSH'}
-
-    duration = round(time.time() - start_time, 2)
-    return {
-        'status': 'Success' if all(download_results) else 'Error',
-        'service': service_folder,
-        'duration_seconds': duration,
-        'message': f"{service_folder} transfer completed."
-    }
-
-# --- Core SSM Helpers ---
-def run_ssm_command_and_get_output(instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return output['StandardOutputContent']
-
-def run_ssm_command(instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return
-
-# --- File Operations via SSM ---
-def get_directory_size_via_ssm(instance_id, source_path):
-    cmd = f"du -sb {source_path} | cut -f1"
-    output = run_ssm_command_and_get_output(instance_id, cmd)
-    return int(output.strip())
-
-def split_directory_via_ssm(instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
-    run_ssm_command(instance_id, cmd)
-    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
-    output = run_ssm_command_and_get_output(instance_id, list_cmd)
-    return output.strip().split('\n')
-
-def compress_directory_via_ssm(instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
-    run_ssm_command(instance_id, cmd)
-    return [f"/mnt/{zip_file_base}.tar.gz"]
-
-def upload_file_to_s3_via_ssm(instance_id, file_path, s3_bucket, s3_prefix):
-    fname = os.path.basename(file_path)
-    cmd = f"aws s3 cp {file_path} s3://{s3_bucket}/{s3_prefix}/{fname}"
-    try:
-        run_ssm_command(instance_id, cmd)
-        logger.info(f"Uploaded {fname} to s3://{s3_bucket}/{s3_prefix}/")
-        return True
-    except Exception as e:
-        logger.error(f"Upload failed: {e}")
-        return False
-
-def download_and_extract_files(instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
-    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
-    files_str = run_ssm_command_and_get_output(instance_id, list_cmd)
-    files = files_str.strip().split('\n')
-    results = []
-
-    for fname in files:
-        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
-        local_file = f"/mnt/{fname}"
-        if fname.endswith('.tar.gz'):
-            cmd = f"aws s3 cp {s3_uri} {local_file} && mkdir -p {dest_path} && pigz -dc {local_file} | tar -xf - -C {dest_path}"
-        else:
-            cmd = f"aws s3 cp {s3_uri} {local_file} && cat {local_file} >> /mnt/{zip_file_base}.tar.gz"
-        try:
-            run_ssm_command(instance_id, cmd)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Download/extract failed for {fname}: {e}")
-            results.append(False)
-
-    # Extract after concat
-    if any(f.endswith('.part.') for f in files):
-        try:
-            extract_final = f"mkdir -p {dest_path} && pigz -dc /mnt/{zip_file_base}.tar.gz | tar -xf - -C {dest_path}"
-            run_ssm_command(instance_id, extract_final)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Final extract failed: {e}")
-            results.append(False)
-
-    return results
-
-# --- Run Locally for Test ---
-if __name__ == "__main__":
-    test_event = {
-        "source_instance": "i-057d31b7dfd13887d",
-        "target_instance": "i-0c78349dfdd100a79",
-        "source_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
-        "destination_path_servicefee": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp",
-        "s3_bucket": "ppj-transfer-bucket"
-    }
-
-    lambda_handler(test_event, None)
-
-
-|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-import boto3
-import time
-import logging
-import os
-from datetime import datetime
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- Dynamic Lambda Handler ---
-def lambda_handler(event, context):
-    # Read JSON (can be passed via event or a file)
-    services = event['services']
-    s3_bucket = event['s3Bucket']
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-
-    results = []
-
-    for service in services:
-        if service['enabled']:  # Only process if the service is enabled
-            # Get the AWS profile from the source environment
-            aws_profile = service['source']['environment']
-            logger.info(f"Processing service: {service['name']} with AWS profile: {aws_profile}")
-
-            # Setup AWS session dynamically based on environment (AWS_PROFILE)
-            session = boto3.Session(profile_name=aws_profile)
-            ssm_client = session.client('ssm')
-            s3_client = session.client('s3')
-
-            source_instance = service['source']['instanceId']
-            source_path = service['source']['path']
-            
-            # Step 1: Process Source Instance (Compress/Split and Upload to S3)
-            upload_result = process_source_instance(ssm_client, s3_client, source_instance, source_path, s3_bucket, service['name'], timestamp)
-
-            if upload_result['status'] == 'Success':
-                # Step 2: For each destination instance, perform the download and extraction
-                for destination in service['destinations']:
-                    destination_profile = destination['environment']
-                    logger.info(f"Switching to destination environment: {destination_profile}")
-                    session = boto3.Session(profile_name=destination_profile)
-                    ssm_client = session.client('ssm')
-                    s3_client = session.client('s3')
-                    
-                    destination_instance = destination['instanceId']
-                    destination_path = destination['path']
-                    
-                    download_result = process_destination_instance(ssm_client, s3_client, destination_instance, s3_bucket, service['name'], timestamp, destination_path)
-                    results.append(download_result)
-
-            else:
-                # If the upload failed, log and skip the destination processing for this service
-                logger.error(f"Failed to process source for service {service['name']}. Skipping destination.")
-                results.append(upload_result)
-
-    # Log the results of all transfers
-    for result in results:
-        logger.info(f"{result['service']}: {result['status']} in {result.get('duration_seconds', 0)}s")
-
-    return {
-        'status': 'Success',
-        'message': f'Transfer finished at {timestamp}',
-        'details': results
-    }
-
-# --- Process Source Instance ---
-def process_source_instance(ssm_client, s3_client, source_instance, source_path, s3_bucket, service_folder, timestamp):
-    try:
-        # Step 1.1: Get Directory Size
-        dir_size = get_directory_size_via_ssm(ssm_client, source_instance, source_path)
-        logger.info(f"[{service_folder}] Directory size: {dir_size} bytes")
-
-        # Step 1.2: Compress or Split based on size
-        if dir_size > SPLIT_ON:
-            split_files = split_directory_via_ssm(ssm_client, source_instance, source_path, service_folder)
-        else:
-            split_files = compress_directory_via_ssm(ssm_client, source_instance, source_path, service_folder)
-
-        if not split_files:
-            return {'status': 'Error', 'service': service_folder, 'message': 'No archive created'}
-
-        # Step 1.3: Upload Files to S3
-        s3_prefix = f"temp/{timestamp}/{service_folder}"
-        upload_results = [upload_file_to_s3_via_ssm(ssm_client, source_instance, f, s3_bucket, s3_prefix) for f in split_files]
-        
-        if not all(upload_results):
-            return {'status': 'Error', 'service': service_folder, 'message': 'Upload failed'}
-        
-        return {'status': 'Success', 'service': service_folder, 'message': 'Upload completed'}
-
-    except Exception as e:
-        logger.error(f"Error processing source for service {service_folder}: {e}")
-        return {'status': 'Error', 'service': service_folder, 'message': f"Error: {e}"}
-
-# --- Process Destination Instance ---
-def process_destination_instance(ssm_client, s3_client, destination_instance, s3_bucket, service_folder, timestamp, destination_path):
-    try:
-        # Step 2.1: Download and Extract Files from S3
-        s3_prefix = f"temp/{timestamp}/{service_folder}"
-        download_results = download_and_extract_files(ssm_client, destination_instance, s3_bucket, s3_prefix, service_folder, destination_path)
-
-        return {
-            'status': 'Success' if all(download_results) else 'Error',
-            'service': service_folder,
-            'message': f"Download and extraction completed for {service_folder}"
-        }
-
-    except Exception as e:
-        logger.error(f"Error processing destination for service {service_folder}: {e}")
-        return {'status': 'Error', 'service': service_folder, 'message': f"Error: {e}"}
-
-# --- Core SSM Helpers (No Changes) ---
-def run_ssm_command_and_get_output(ssm_client, instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return output['StandardOutputContent']
-
-def run_ssm_command(ssm_client, instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=1800,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(60):
-        time.sleep(5)
-        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return
-
-# --- File Operations via SSM ---
-def get_directory_size_via_ssm(ssm_client, instance_id, source_path):
-    cmd = f"du -sb {source_path} | cut -f1"
-    output = run_ssm_command_and_get_output(ssm_client, instance_id, cmd)
-    return int(output.strip())
-
-def split_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - /mnt/{zip_file_base}.part."
-    run_ssm_command(ssm_client, instance_id, cmd)
-    list_cmd = f"ls /mnt/{zip_file_base}.part.*"
-    output = run_ssm_command_and_get_output(ssm_client, instance_id, list_cmd)
-    return output.strip().split('\n')
-
-def compress_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 > /mnt/{zip_file_base}.tar.gz"
-    run_ssm_command(ssm_client, instance_id, cmd)
-    return [f"/mnt/{zip_file_base}.tar.gz"]
-
-def upload_file_to_s3_via_ssm(ssm_client, instance_id, file_path, s3_bucket, s3_prefix):
-    fname = os.path.basename(file_path)
-    cmd = f"aws s3 cp {file_path} s3://{s3_bucket}/{s3_prefix}/{fname}"
-    try:
-        run_ssm_command(ssm_client, instance_id, cmd)
-        logger.info(f"Uploaded {fname} to s3://{s3_bucket}/{s3_prefix}/")
-        return True
-    except Exception as e:
-        logger.error(f"Upload failed: {e}")
-        return False
-
-def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
-    list_cmd = f"aws s3 ls s3://{s3_bucket}/{s3_prefix}/ | awk '{{print $4}}'"
-    files_str = run_ssm_command_and_get_output(ssm_client, instance_id, list_cmd)
-    files = files_str.strip().split('\n')
-    results = []
-
-    for fname in files:
-        s3_uri = f"s3://{s3_bucket}/{s3_prefix}/{fname}"
-        local_file = f"/mnt/{fname}"
-        if fname.endswith('.tar.gz'):
-            cmd = f"aws s3 cp {s3_uri} {local_file} && mkdir -p {dest_path} && pigz -dc {local_file} | tar -xf - -C {dest_path}"
-        else:
-            cmd = f"aws s3 cp {s3_uri} {local_file} && cat {local_file} >> /mnt/{zip_file_base}.tar.gz"
-        try:
-            run_ssm_command(ssm_client, instance_id, cmd)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Download/extract failed for {fname}: {e}")
-            results.append(False)
-
-    # Extract after concat
-    if any(f.endswith('.part.') for f in files):
-        try:
-            extract_final = f"mkdir -p {dest_path} && pigz -dc /mnt/{zip_file_base}.tar.gz | tar -xf - -C {dest_path}"
-            run_ssm_command(ssm_client, instance_id, extract_final)
-            results.append(True)
-        except Exception as e:
-            logger.error(f"Final extract failed: {e}")
-            results.append(False)
-
-    return results
-
-# --- Run Locally for Test ---
-if __name__ == "__main__":
-    # JSON event to be passed to lambda_handler
-    event = {
-        "eventName": "db_refresh",
-        "s3Bucket": "ppj-transfer-bucket",
-        "services": [
-            {
-                "name": "Journey Service",
-                "enabled": False,
-                "description": "Transfers journey data between source to destination.",
-                "source": {
-                    "environment": "ppj",
-                    "instanceId": "i-057d31b7dfd13887d",
-                    "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp"
-                },
-                "destinations": [
-                    {
-                        "environment": "qa",
-                        "instanceId": "i-0c78349dfdd100a79",
-                        "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp"
-                    },
-                    {
-                        "environment": "prod",
-                        "instanceId": "i-0ab123cdef4567890",
-                        "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp2"
-                    }
-                ]
-            },
-            {
-                "name": "Pricing Service",
-                "enabled": True,
-                "description": "Syncs pricing database from QA to production.",
-                "source": {
-                    "environment": "qa",
-                    "instanceId": "i-023abc456def78901",
-                    "path": "/opt/atpco/engine/db/neo4j/pricing/Engine_tmp"
-                },
-                "destinations": [
-                    {
-                        "environment": "prod",
-                        "instanceId": "i-045def123abc45678",
-                        "path": "/opt/atpco/engine/db/neo4j/pricing/Engine_tmp"
-                    }
-                ]
-            }
-        ]
-    }
-
-    lambda_handler(event, None)
-
-###############################################################################################
 import boto3
 import time
 import logging
@@ -761,6 +7,7 @@ from datetime import datetime
 # Constants
 SPLIT_ON = 2 * 1024 * 1024 * 1024  # 2 GB
 SPLIT_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
+IS_SPLIT = False
 MNT_PATH = '/mnt'
 SSM_TIMEOUT = 1800
 SSM_INTERVAL = 5
@@ -858,6 +105,8 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
             return {'status': 'Success', 'service': service_folder, 'message': 'Dry-run: Upload skipped'}
 
         if dir_size > SPLIT_ON:
+            global IS_SPLIT
+            IS_SPLIT = True
             split_files = split_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
         else:
             split_files = compress_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
@@ -943,9 +192,25 @@ def get_directory_size_via_ssm(ssm_client, instance_id, source_path):
     return int(output.strip())
 
 def split_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base):
-    cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - {MNT_PATH}/{zip_file_base}.part."
-    run_ssm_command(ssm_client, instance_id, cmd)
-    list_cmd = f"ls {MNT_PATH}/{zip_file_base}.part.*"
+
+    # cmd = f"cd {source_path} && tar -cf - . | pigz -p 4 | split -b {SPLIT_SIZE} - {MNT_PATH}/{zip_file_base}.part."
+    # run_ssm_command(ssm_client, instance_id, cmd)
+    # list_cmd = f"ls {MNT_PATH}/{zip_file_base}.part.*"
+    # output = run_ssm_command_and_get_output(ssm_client, instance_id, list_cmd)
+    # return output.strip().split('\n')
+    tar_path = f"{MNT_PATH}/{zip_file_base}.tar.gz"
+    split_prefix = f"{MNT_PATH}/{zip_file_base}.part."
+ 
+    # Step 1: Create compressed archive
+    cmd_compress = f"cd {source_path} && tar -cf - . | pigz -p 4 > {tar_path}"
+    run_ssm_command(ssm_client, instance_id, cmd_compress)
+ 
+    # Step 2: Split it
+    cmd_split = f"split -b {SPLIT_SIZE} -d -a 3 {tar_path} {split_prefix}"
+    run_ssm_command(ssm_client, instance_id, cmd_split)
+ 
+    # Step 3: List split parts
+    list_cmd = f"ls {split_prefix}*"
     output = run_ssm_command_and_get_output(ssm_client, instance_id, list_cmd)
     return output.strip().split('\n')
 
@@ -985,15 +250,19 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
         download_cmd = f"aws s3 cp s3://{s3_bucket}/{s3_prefix}/ {MNT_PATH}/ --recursive --only-show-errors"
         run_ssm_command(ssm_client, instance_id, download_cmd)
 
+        if IS_SPLIT:
         # Combine and extract split files or extract single file
-        split_prefix = f"{MNT_PATH}/{zip_file_base}.part."
-        combined_file = f"{MNT_PATH}/{zip_file_base}.tar.gz"
-        list_parts_cmd = f"ls {split_prefix}* 2>/dev/null"
-        parts_output = run_ssm_command_and_get_output(ssm_client, instance_id, list_parts_cmd)
+            split_prefix = f"{MNT_PATH}/{zip_file_base}.part."
+            combined_file = f"{MNT_PATH}/{zip_file_base}.tar.gz"
+            list_parts_cmd = f"ls {split_prefix}* 2>/dev/null"
+            parts_output = run_ssm_command_and_get_output(ssm_client, instance_id, list_parts_cmd)
 
-        if parts_output.strip():
+        #if parts_output.strip():
+        if IS_SPLIT:
             # Join split parts
-            join_cmd = f"cat {split_prefix}* > {combined_file}"
+            # join_cmd = f"cat {split_prefix}* > {combined_file}"
+            join_cmd = f"ls {split_prefix}* | sort -V | xarg cat > {combined_file}"
+
             run_ssm_command(ssm_client, instance_id, join_cmd)
             # Remove split files
             cleanup_cmd = f"rm -f {split_prefix}*"
@@ -1015,75 +284,63 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
     except Exception as e:
         logger.error(f"Failed to download/extract for {zip_file_base}: {e}")
         return [False]
-JSONNNNNNNNNNNNNNNNNNNNNNNNN
+
+
 if __name__ == "__main__":
     test_event = {
         "services": [
             {
-                "enabled": True,
-                "name": "test-service",
+                "enabled": False,
+                "name": "journey",
                 "source": {
-                    "environment": "dev-profile",
-                    "instanceId": "i-0123456789abcdef0",
-                    "path": "/data/source"
+                    "environment": "ppj",
+                    "instanceId": "i-057d31b7dfd13887d",
+                    "path": "/opt/atpco/engine/db/neo4j/journey/all"
                 },
                 "destinations": [
                     {
-                        "environment": "prod-profile",
-                        "instanceId": "i-0abcdef1234567890",
-                        "path": "/data/destination"
+                        "environment": "ppj",
+                        "instanceId": "i-057d31b7dfd13887d",
+                        "path": "/opt/atpco/engine/db/neo4j/journey/all_1"
+                    }
+                ]
+            },
+            {
+                "enabled": False,
+                "name": "servicefee",
+                "source": {
+                    "environment": "ppj",
+                    "instanceId": "i-057d31b7dfd13887d",
+                    "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp"
+                },
+                "destinations": [
+                    {
+                        "environment": "ppj",
+                        "instanceId": "i-057d31b7dfd13887d",
+                        "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
+                    }
+                ]
+            },
+            {
+                "enabled": True,
+                "name": "journey1",
+                "source": {
+                    "environment": "engu",
+                    "instanceId": "i-0703c925af9018ad3",
+                    "path": "/opt/atpco/engine/db/neo4j/chgdetroutings/Routings"
+                },
+                "destinations": [
+                    {
+                        "environment": "ppj",
+                        "instanceId": "i-057d31b7dfd13887d",
+                        "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
                     }
                 ]
             }
+
         ],
-        "s3Bucket": "your-s3-bucket-name",
-        "dryRun": True  # or False
+        "s3Bucket": "ppj-transfer-bucket",
+        "dryRun": False 
     }
 
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowENGUAccountToUpload",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::985663031727:role/DevAdmin-Dev"
-      },
-      "Action": [
-        "s3:PutObject",
-        "s3:PutObjectAcl",
-        "s3:CreateMultipartUpload",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::db_refresh",
-        "arn:aws:s3:::db_refresh/*"
-      ]
-    }
-  ]
-}
-
-
-
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "UploadToCrossAccountBucket",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:CreateMultipartUpload",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::db_refresh",
-        "arn:aws:s3:::db_refresh/*"
-      ]
-    }
-  ]
-}
+    lambda_handler(test_event, None)

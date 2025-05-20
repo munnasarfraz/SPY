@@ -344,3 +344,99 @@ if __name__ == "__main__":
     }
 
     lambda_handler(test_event, None)
+
+
+
+
+========================================================
+
+def lambda_handler(event, context):
+    services = event['services']
+    s3_bucket = event['s3Bucket']
+    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    dry_run = event.get('dryRun', False)
+    detailed_results = []
+
+    for service in services:
+        if not service['enabled']:
+            detailed_results.append({
+                **service,
+                'status': 'Skipped',
+                'message': 'Service disabled',
+                'duration_seconds': 0
+            })
+            continue
+
+        service_name = service['name']
+        start_time = time.time()
+        source_env = service['source']['environment']
+        logger.info(f"Processing service: {service_name} from source env: {source_env}")
+
+        source_session = get_session(source_env)
+        source_ssm_client = source_session.client('ssm')
+        source_s3_client = source_session.client('s3')
+
+        source_instance = service['source']['instanceId']
+        source_path = service['source']['path']
+
+        upload_result = process_source_instance(
+            source_ssm_client, source_s3_client,
+            source_instance, source_path,
+            s3_bucket, service_name, timestamp, dry_run
+        )
+
+        service_result = {
+            **service,
+            'upload_result': upload_result,
+            'download_results': [],
+            'duration_seconds': None  # Will set below
+        }
+
+        if upload_result['status'] != 'Success':
+            logger.error(f"Failed to process source for service {service_name}. Skipping all destinations.")
+            service_result['status'] = 'Error'
+            service_result['message'] = upload_result.get('message', 'Unknown error during upload')
+        else:
+            all_download_success = True
+            for destination in service['destinations']:
+                dest_env = destination['environment']
+                logger.info(f"Processing destination in env: {dest_env}")
+
+                dest_session = get_session(dest_env)
+                dest_ssm_client = dest_session.client('ssm')
+                dest_s3_client = dest_session.client('s3')
+
+                dest_instance = destination['instanceId']
+                dest_path = destination['path']
+
+                download_result = process_destination_instance(
+                    dest_ssm_client, dest_s3_client,
+                    dest_instance, s3_bucket,
+                    service_name, timestamp, dest_path, dry_run
+                )
+
+                service_result['download_results'].append({
+                    **destination,
+                    **download_result
+                })
+
+                if download_result['status'] != 'Success':
+                    all_download_success = False
+
+            service_result['status'] = 'Success' if all_download_success else 'Error'
+            service_result['message'] = 'Transfer completed' if all_download_success else 'Download failed for one or more destinations'
+
+        service_result['duration_seconds'] = time.time() - start_time
+        detailed_results.append(service_result)
+
+    logger.info("Final summary:")
+    for res in detailed_results:
+        logger.info(f"{res['name']}: {res['status']} in {res['duration_seconds']:.2f}s")
+
+    return {
+        'status': 'Success',
+        'message': f'Transfer finished at {timestamp}',
+        'services': detailed_results,
+        'original_event': event
+    }
+

@@ -1,36 +1,61 @@
 from concurrent.futures import ThreadPoolExecutor
 import logging
+from datetime import datetime
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-def lambda_handler(event, context):
-    # ... your existing code before thread execution
+def lambda_handler(event):
+    dry_run = event.get('dry_run', False)
+    multi_threaded = event.get('multi_threaded', True)
+
+    logger.info(f"Script started | Dry Run: {dry_run} | Multi-threaded: {multi_threaded}")
+
+    services = event.get("services", [])
+    s3_bucket = event.get("s3_bucket", "default-s3-bucket")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+    results = []
 
     for service in services:
-        if not service['enabled']:
+        if not service.get('enabled', False):
             logger.info(f"Skipping disabled service: {service['name']}")
             continue
 
         logger.info(f"Processing service: {service['name']}")
+        service_result = {
+            "name": service['name'],
+            "status": "Pending",
+            "upload_result": None,
+            "download_results": []
+        }
 
-        # ... your existing upload logic
+        upload_result = upload_and_split_file(
+            service['source'], s3_bucket, service['name'], timestamp, dry_run
+        )
+        service_result["upload_result"] = upload_result
 
         if upload_result['status'] != 'Success':
-            logger.error(f"Upload failed for service {service['name']} - skipping downloads.")
+            logger.error(f"Upload failed for service {service['name']}")
             service_result['status'] = 'Error'
-            service_result['message'] = 'Upload failed; skipping destination downloads.'
-            service_result['download_results'] = []
-        else:
-            all_download_success = True
-            service_result['download_results'] = []
+            service_result['message'] = 'Upload failed; skipping download.'
+            results.append(service_result)
+            continue
 
-            def thread_wrapper(dest_ssm_client, dest_s3_client, dest_instance, s3_bucket, service_name, timestamp, dest_path, dry_run):
-                logger.info(f"[{dest_instance}] Starting download and extraction")
-                result = process_destination_instance(dest_ssm_client, dest_s3_client, dest_instance, s3_bucket, service_name, timestamp, dest_path, dry_run)
-                logger.info(f"[{dest_instance}] Finished download and extraction with status: {result.get('status', 'Unknown')}")
-                return result
+        all_download_success = True
 
+        def thread_wrapper(dest_ssm_client, dest_s3_client, dest_instance, s3_bucket, service_name, timestamp, dest_path, dry_run):
+            logger.info(f"[{dest_instance}] Starting download and extract")
+            result = process_destination_instance(
+                dest_ssm_client, dest_s3_client,
+                dest_instance, s3_bucket,
+                service_name, timestamp, dest_path, dry_run
+            )
+            logger.info(f"[{dest_instance}] Finished with status: {result.get('status')}")
+            return result
+
+        if multi_threaded:
+            logger.info(f"Using MULTI-THREADED mode for service: {service['name']}")
             with ThreadPoolExecutor(max_workers=len(service['destinations'])) as executor:
                 futures = []
                 for destination in service['destinations']:
@@ -42,8 +67,7 @@ def lambda_handler(event, context):
                     dest_instance = destination['instanceId']
                     dest_path = destination['path']
 
-                    logger.info(f"Submitting download task for destination instance {dest_instance}")
-
+                    logger.info(f"Submitting thread for {dest_instance}")
                     future = executor.submit(
                         thread_wrapper,
                         dest_ssm_client, dest_s3_client,
@@ -57,25 +81,57 @@ def lambda_handler(event, context):
                     dest_instance = destination['instanceId']
                     try:
                         download_result = future.result()
-                        logger.info(f"Download task completed for destination instance {dest_instance} with status: {download_result['status']}")
+                        logger.info(f"Completed thread for {dest_instance} with status: {download_result['status']}")
                     except Exception as e:
-                        logger.error(f"Exception in thread for destination instance {dest_instance}: {e}")
+                        logger.error(f"Thread failed for {dest_instance}: {e}")
                         download_result = {'status': 'Error', 'message': f'Thread exception: {e}'}
 
                     service_result['download_results'].append({
                         **destination,
                         **download_result
                     })
-
                     if download_result['status'] != 'Success':
                         all_download_success = False
+        else:
+            logger.info(f"Using SEQUENTIAL mode for service: {service['name']}")
+            for destination in service['destinations']:
+                dest_env = destination['environment']
+                dest_session = get_session(dest_env)
+                dest_ssm_client = dest_session.client('ssm')
+                dest_s3_client = dest_session.client('s3')
 
-            service_result['status'] = 'Success' if all_download_success else 'Error'
-            service_result['message'] = 'Transfer completed' if all_download_success else 'Download failed for one or more destinations'
+                dest_instance = destination['instanceId']
+                dest_path = destination['path']
 
-    # ... your existing code after threads
+                logger.info(f"Starting sequential download for {dest_instance}")
+                try:
+                    download_result = thread_wrapper(
+                        dest_ssm_client, dest_s3_client,
+                        dest_instance, s3_bucket,
+                        service['name'], timestamp,
+                        dest_path, dry_run
+                    )
+                except Exception as e:
+                    logger.error(f"Sequential error for {dest_instance}: {e}")
+                    download_result = {'status': 'Error', 'message': f'Sequential exception: {e}'}
 
+                logger.info(f"Completed sequential download for {dest_instance} with status: {download_result['status']}")
+                service_result['download_results'].append({
+                    **destination,
+                    **download_result
+                })
+                if download_result['status'] != 'Success':
+                    all_download_success = False
 
+        service_result['status'] = 'Success' if all_download_success else 'Error'
+        service_result['message'] = 'All destinations completed' if all_download_success else 'Some downloads failed'
+        results.append(service_result)
+
+    logger.info("Execution completed")
+    return {
+        "status": "done",
+        "results": results
+    }
 
 
 

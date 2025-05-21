@@ -31,17 +31,23 @@ def lambda_handler(event, context):
     s3_bucket = event['s3Bucket']
     timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
     dry_run = event.get('dryRun', False)
-    results = []
+    detailed_results = []
 
     for service in services:
         if not service['enabled']:
+            detailed_results.append({
+                **service,
+                'status': 'Skipped',
+                'message': 'Service disabled',
+                'duration_seconds': 0
+            })
             continue
 
         service_name = service['name']
+        start_time = time.time()
         source_env = service['source']['environment']
         logger.info(f"Processing service: {service_name} from source env: {source_env}")
 
-        # Source client setup
         source_session = get_session(source_env)
         source_ssm_client = source_session.client('ssm')
         source_s3_client = source_session.client('s3')
@@ -55,43 +61,68 @@ def lambda_handler(event, context):
             s3_bucket, service_name, timestamp, dry_run
         )
 
-        # Always track the upload result
-        results.append(upload_result)
+        service_result = {
+            **service,
+            'upload_result': upload_result,
+            'download_results': [],
+            'duration_seconds': None  # Will set below
+        }
 
         if upload_result['status'] != 'Success':
             logger.error(f"Failed to process source for service {service_name}. Skipping all destinations.")
-            continue
+            service_result['status'] = 'Error'
+            service_result['message'] = upload_result.get('message', 'Unknown error during upload')
+        else:
+            all_download_success = True
+            for destination in service['destinations']:
+                dest_env = destination['environment']
+                logger.info(f"Processing destination in env: {dest_env}")
 
-        for destination in service['destinations']:
-            dest_env = destination['environment']
-            logger.info(f"Processing destination in env: {dest_env}")
+                dest_session = get_session(dest_env)
+                dest_ssm_client = dest_session.client('ssm')
+                dest_s3_client = dest_session.client('s3')
 
-            # Destination client setup
-            dest_session = get_session(dest_env)
-            dest_ssm_client = dest_session.client('ssm')
-            dest_s3_client = dest_session.client('s3')
+                dest_instance = destination['instanceId']
+                dest_path = destination['path']
 
-            dest_instance = destination['instanceId']
-            dest_path = destination['path']
+                download_result = process_destination_instance(
+                    dest_ssm_client, dest_s3_client,
+                    dest_instance, s3_bucket,
+                    service_name, timestamp, dest_path, dry_run
+                )
 
-            download_result = process_destination_instance(
-                dest_ssm_client, dest_s3_client,
-                dest_instance, s3_bucket,
-                service_name, timestamp, dest_path, dry_run
-            )
+                service_result['download_results'].append({
+                    **destination,
+                    **download_result
+                })
 
-            # Track result per destination
-            results.append(download_result)
+                if download_result['status'] != 'Success':
+                    all_download_success = False
 
-    # Log summary
-    for result in results:
-        logger.info(f"{result['service']}: {result['status']} in {result.get('duration_seconds', 0):.2f}s")
+            service_result['status'] = 'Success' if all_download_success else 'Error'
+            service_result['message'] = 'Transfer completed' if all_download_success else 'Download failed for one or more destinations'
+
+        service_result['duration_seconds'] = time.time() - start_time
+        detailed_results.append(service_result)
+
+    logger.info("Final summary:")
+    for res in detailed_results:
+        logger.info(f"{res['name']}: {res['status']} in {res['duration_seconds']:.2f}s")
 
     return {
         'status': 'Success',
         'message': f'Transfer finished at {timestamp}',
-        'details': results
+        'services': detailed_results
     }
+# 'original_event': event
+
+
+def get_available_size_via_ssm(ssm_client, instance_id, source_path):
+    cmd = f"df -k {source_path} | tail -1 | awk '{{print $4}}'"
+    output = run_ssm_command_and_get_output(ssm_client, instance_id, cmd)
+    size_in_bytes = int(output.strip()) * 1024
+    # size_in_megabytes = size_in_bytes / (1024 * 1024)  # Convert from bytes to MB
+    return size_in_bytes
 
 
 def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_bucket, service_folder, timestamp, dry_run):
@@ -104,12 +135,20 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
             logger.info(f"[{service_folder}] Dry-run enabled. Skipping upload.")
             return {'status': 'Success', 'service': service_folder, 'message': 'Dry-run: Upload skipped'}
 
-        if dir_size > SPLIT_ON:
-            global IS_SPLIT
-            IS_SPLIT = True
-            split_files = split_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
+        available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, source_path)
+        if available_size_in_bytes > dir_size:
+            if dir_size > SPLIT_ON:
+                global IS_SPLIT
+                IS_SPLIT = True
+                split_files = split_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
+            else:
+                split_files = compress_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
         else:
-            split_files = compress_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
+            logger.warning(f"Disk space issue - available disk space [{available_size_in_bytes}] expected disk space: {dir_size} bytes")
+            difference_in_bytes = dir_size - available_size_in_bytes
+            difference_in_mb = difference_in_bytes / (1024 * 1024)
+            logger.error(f"Cleanup the instance [{instance_id}] at least [{difference_in_mb:.2f}] MB")
+            return {'status': 'Error', 'service': service_folder, 'message': f'Insufficient disk space: {difference_in_mb:.2f} MB needed'}
 
         if not split_files:
             return {'status': 'Error', 'service': service_folder, 'message': 'No archive created'}
@@ -132,14 +171,27 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
 
 def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, service_folder, timestamp, dest_path, dry_run):
     try:
+        bucket_size = 0
         start_time = time.time()
         if dry_run:
             logger.info(f"[{service_folder}] Dry-run enabled. Skipping download.")
             return {'status': 'Success', 'service': service_folder, 'message': 'Dry-run: Download skipped'}
 
         s3_prefix = f"temp/{timestamp}/{service_folder}"
-        download_results = download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, service_folder, dest_path)
+        bucket_size = get_s3_bucket_size(s3_client, s3_bucket, s3_prefix)
+        available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, dest_path)
+        cleanup_directory(ssm_client, instance_id, dest_path)
+        available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, dest_path)
 
+        if available_size_in_bytes > bucket_size :
+            download_results = download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, service_folder, dest_path)
+        else:          
+            logger.warning(f"Disk space issue - available disk space [{available_size_in_bytes}] expected disk space: {bucket_size} bytes")
+            difference_in_bytes = bucket_size - available_size_in_bytes
+            difference_in_mb = difference_in_bytes / (1024 * 1024)
+            logger.error(f"Cleanup the instance [{instance_id}] at least [{difference_in_mb:.2f}] MB")
+            return {'status': 'Error', 'service': service_folder, 'message': f"Insufficient disk space: {difference_in_mb:.2f} MB needed"}
+            
         duration = time.time() - start_time
         return {
             'status': 'Success' if all(download_results) else 'Error',
@@ -240,6 +292,27 @@ def cleanup_temp_files(ssm_client, instance_id, file_paths):
         except Exception as e:
             logger.warning(f"Failed to clean up {file_path}: {e}")
 
+def cleanup_directory(ssm_client, instance_id, dir_paths):
+    cmd = f"rm -rf {dir_paths}/*"
+    try:
+        run_ssm_command(ssm_client, instance_id, cmd)
+        logger.info(f"Successfully cleaned up {dir_paths}")
+    except ssm_client.exceptions.CommandFailed as e:
+        logger.error(f"SSM command failed for {dir_paths}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to clean up {dir_paths}: {e}")
+
+def get_s3_bucket_size(s3_client, bucket_name, prefix=''):
+    paginator = s3_client.get_paginator('list_objects_v2')
+    total_size = 0
+
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            total_size += obj['Size']
+
+    return total_size
+
+
 def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
     try:
         # Create local destination path if not exists
@@ -261,7 +334,7 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
         if IS_SPLIT:
             # Join split parts
             # join_cmd = f"cat {split_prefix}* > {combined_file}"
-            join_cmd = f"ls {split_prefix}* | sort -V | xarg cat > {combined_file}"
+            join_cmd = f"ls {split_prefix}* | sort -V | xargs cat > {combined_file}"
 
             run_ssm_command(ssm_client, instance_id, join_cmd)
             # Remove split files
@@ -306,7 +379,7 @@ if __name__ == "__main__":
                 ]
             },
             {
-                "enabled": False,
+                "enabled": True,
                 "name": "servicefee",
                 "source": {
                     "environment": "ppj",
@@ -322,7 +395,7 @@ if __name__ == "__main__":
                 ]
             },
             {
-                "enabled": True,
+                "enabled": False,
                 "name": "journey1",
                 "source": {
                     "environment": "engu",
@@ -343,181 +416,5 @@ if __name__ == "__main__":
         "dryRun": False 
     }
 
-    lambda_handler(test_event, None)
-
-
-
-
-========================================================
-
-def lambda_handler(event, context):
-    services = event['services']
-    s3_bucket = event['s3Bucket']
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-    dry_run = event.get('dryRun', False)
-    detailed_results = []
-
-    for service in services:
-        if not service['enabled']:
-            detailed_results.append({
-                **service,
-                'status': 'Skipped',
-                'message': 'Service disabled',
-                'duration_seconds': 0
-            })
-            continue
-
-        service_name = service['name']
-        start_time = time.time()
-        source_env = service['source']['environment']
-        logger.info(f"Processing service: {service_name} from source env: {source_env}")
-
-        source_session = get_session(source_env)
-        source_ssm_client = source_session.client('ssm')
-        source_s3_client = source_session.client('s3')
-
-        source_instance = service['source']['instanceId']
-        source_path = service['source']['path']
-
-        upload_result = process_source_instance(
-            source_ssm_client, source_s3_client,
-            source_instance, source_path,
-            s3_bucket, service_name, timestamp, dry_run
-        )
-
-        service_result = {
-            **service,
-            'upload_result': upload_result,
-            'download_results': [],
-            'duration_seconds': None  # Will set below
-        }
-
-        if upload_result['status'] != 'Success':
-            logger.error(f"Failed to process source for service {service_name}. Skipping all destinations.")
-            service_result['status'] = 'Error'
-            service_result['message'] = upload_result.get('message', 'Unknown error during upload')
-        else:
-            all_download_success = True
-            for destination in service['destinations']:
-                dest_env = destination['environment']
-                logger.info(f"Processing destination in env: {dest_env}")
-
-                dest_session = get_session(dest_env)
-                dest_ssm_client = dest_session.client('ssm')
-                dest_s3_client = dest_session.client('s3')
-
-                dest_instance = destination['instanceId']
-                dest_path = destination['path']
-
-                download_result = process_destination_instance(
-                    dest_ssm_client, dest_s3_client,
-                    dest_instance, s3_bucket,
-                    service_name, timestamp, dest_path, dry_run
-                )
-
-                service_result['download_results'].append({
-                    **destination,
-                    **download_result
-                })
-
-                if download_result['status'] != 'Success':
-                    all_download_success = False
-
-            service_result['status'] = 'Success' if all_download_success else 'Error'
-            service_result['message'] = 'Transfer completed' if all_download_success else 'Download failed for one or more destinations'
-
-        service_result['duration_seconds'] = time.time() - start_time
-        detailed_results.append(service_result)
-
-    logger.info("Final summary:")
-    for res in detailed_results:
-        logger.info(f"{res['name']}: {res['status']} in {res['duration_seconds']:.2f}s")
-
-    return {
-        'status': 'Success',
-        'message': f'Transfer finished at {timestamp}',
-        'services': detailed_results,
-        'original_event': event
-    }
-
-/////////////////////
-{
-  "status": "Success",
-  "message": "Transfer finished at 20250520-143515",
-  "services": [
-    {
-      "enabled": false,
-      "name": "journey",
-      "source": {
-        "environment": "ppj",
-        "instanceId": "i-057d31b7dfd13887d",
-        "path": "/opt/atpco/engine/db/neo4j/journey/all"
-      },
-      "destinations": [
-        {
-          "environment": "ppj",
-          "instanceId": "i-057d31b7dfd13887d",
-          "path": "/opt/atpco/engine/db/neo4j/journey/all_1"
-        }
-      ],
-      "status": "Skipped",
-      "message": "Service disabled",
-      "duration_seconds": 0
-    },
-    {
-      "enabled": true,
-      "name": "servicefee",
-      "source": {
-        "environment": "ppj",
-        "instanceId": "i-057d31b7dfd13887d",
-        "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp"
-      },
-      "destinations": [
-        {
-          "environment": "ppj",
-          "instanceId": "i-057d31b7dfd13887d",
-          "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
-        }
-      ],
-      "upload_result": {
-        "status": "Success",
-        "service": "servicefee",
-        "message": "Upload completed",
-        "duration_seconds": 143.38631343841553
-      },
-      "download_results": [
-        {
-          "environment": "ppj",
-          "instanceId": "i-057d31b7dfd13887d",
-          "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1",
-          "status": "Success",
-          "service": "servicefee",
-          "message": "Download and extraction completed for servicefee",
-          "duration_seconds": 138.41590118408203
-        }
-      ],
-      "duration_seconds": 282.2965531349182,
-      "status": "Success",
-      "message": "Transfer completed"
-    },
-    {
-      "enabled": false,
-      "name": "journey1",
-      "source": {
-        "environment": "engu",
-        "instanceId": "i-0703c925af9018ad3",
-        "path": "/opt/atpco/engine/db/neo4j/chgdetroutings/Routings"
-      },
-      "destinations": [
-        {
-          "environment": "ppj",
-          "instanceId": "i-057d31b7dfd13887d",
-          "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
-        }
-      ],
-      "status": "Skipped",
-      "message": "Service disabled",
-      "duration_seconds": 0
-    }
-  ]
-}
+    ret_val = lambda_handler(test_event, None)
+    print(ret_val)

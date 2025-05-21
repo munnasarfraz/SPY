@@ -1,0 +1,301 @@
+import json
+
+# JSON input data
+data = {
+    "status": "Success",
+    "message": "Transfer finished at 20250520-143515",
+    "services": [
+        {
+            "enabled": False,
+            "name": "journey",
+            "source": {
+                "environment": "ppj",
+                "instanceId": "i-057d31b7dfd13887d",
+                "path": "/opt/atpco/engine/db/neo4j/journey/all"
+            },
+            "destinations": [
+                {
+                    "environment": "ppj",
+                    "instanceId": "i-057d31b7dfd13887d",
+                    "path": "/opt/atpco/engine/db/neo4j/journey/all_1"
+                }
+            ],
+            "status": "Skipped",
+            "message": "Service disabled",
+            "duration_seconds": 0
+        },
+        {
+            "enabled": True,
+            "name": "servicefee",
+            "source": {
+                "environment": "ppj",
+                "instanceId": "i-057d31b7dfd13887d",
+                "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp"
+            },
+            "destinations": [
+                {
+                    "environment": "ppj",
+                    "instanceId": "i-057d31b7dfd13887d",
+                    "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1"
+                },
+                {
+                    "environment": "backup",
+                    "instanceId": "i-0f3d12b7af32f6acd",
+                    "path": "/mnt/backup/servicefee"
+                }
+            ],
+            "upload_result": {
+                "status": "Success",
+                "service": "servicefee",
+                "message": "Upload completed",
+                "duration_seconds": 143.386
+            },
+            "download_results": [
+                {
+                    "environment": "ppj",
+                    "instanceId": "i-057d31b7dfd13887d",
+                    "path": "/opt/atpco/engine/db/neo4j/chgdet/Engine_tmp_1",
+                    "status": "Success",
+                    "service": "servicefee",
+                    "message": "Download and extraction completed for servicefee",
+                    "duration_seconds": 138.416
+                }
+            ],
+            "duration_seconds": 282.297,
+            "status": "Success",
+            "message": "Transfer completed"
+        },
+        {
+            "enabled": True,
+            "name": "farecheck",
+            "source": {
+                "environment": "ppj",
+                "instanceId": "i-0abcd1234efgh5678",
+                "path": "/opt/atpco/engine/db/neo4j/farecheck"
+            },
+            "destinations": [
+                {
+                    "environment": "ppj",
+                    "instanceId": "i-0abcd1234efgh5678",
+                    "path": "/opt/atpco/engine/db/neo4j/farecheck_1"
+                }
+            ],
+            "upload_result": {
+                "status": "Failed",
+                "service": "farecheck",
+                "message": "Connection timeout",
+                "duration_seconds": 5.123
+            },
+            "download_results": [],
+            "duration_seconds": 5.123,
+            "status": "Failed",
+            "message": "Transfer failed"
+        }
+    ]
+}
+
+# Card rendering
+def render_source_card(source):
+    return f"""
+    <div class="col-md-4">
+        <div class="card border-primary h-100">
+            <div class="card-header bg-primary text-white">
+                <i class="fas fa-arrow-up"></i> Source - {source['instanceId']}
+            </div>
+            <div class="card-body">
+                <i class="fas fa-cogs text-secondary me-2"></i><strong>Environment:</strong> {source['environment']}<br>
+                <i class="fas fa-desktop text-secondary me-2"></i><strong>Path:</strong> {source['path']}
+            </div>
+        </div>
+    </div>
+    """
+
+def render_destination_cards(destinations):
+    cards = ""
+    for dest in destinations:
+        cards += f"""
+        <div class="col-md-4">
+            <div class="card border-success h-100">
+                <div class="card-header bg-success text-white">
+                    <i class="fas fa-arrow-down"></i> Destination - {dest['instanceId']}
+                </div>
+                <div class="card-body">
+                    <i class="fas fa-cogs text-secondary me-2"></i><strong>Environment:</strong> {dest['environment']}<br>
+                    <i class="fas fa-desktop text-secondary me-2"></i><strong>Path:</strong> {dest['path']}
+                </div>
+            </div>
+        </div>
+        """
+    return cards
+
+def render_service_card(svc, idx):
+    expanded = "show" if svc["enabled"] else ""
+    collapsed = "" if svc["enabled"] else "collapsed"
+    svc_id = f"svc{idx}"
+    status_badge = {
+        "Success": "badge bg-success",
+        "Skipped": "badge bg-warning text-dark",
+        "Failed": "badge bg-danger"
+    }.get(svc["status"], "badge bg-secondary")
+
+    source_card = render_source_card(svc["source"])
+    dest_cards = render_destination_cards(svc["destinations"])
+
+    table_rows = ""
+    if svc["enabled"]:
+        ur = svc.get("upload_result", {})
+        if ur:
+            table_rows += f"<tr><td>Upload</td><td>{ur.get('status')}</td><td>{ur.get('message')}</td><td>{ur.get('duration_seconds', 0):.2f}</td></tr>"
+        for dr in svc.get("download_results", []):
+            table_rows += f"<tr><td>Download</td><td>{dr.get('status')}</td><td>{dr.get('message')}</td><td>{dr.get('duration_seconds', 0):.2f}</td></tr>"
+
+    table_html = f"""
+    <table class="table table-bordered table-sm mt-3">
+        <thead class="table-light"><tr><th>Type</th><th>Status</th><th>Message</th><th>Duration (s)</th></tr></thead>
+        <tbody>{table_rows}</tbody>
+    </table>
+    """ if table_rows else ""
+
+    return f"""
+    <div class="accordion-item mb-3">
+        <h2 class="accordion-header" id="heading{svc_id}">
+            <button class="accordion-button {collapsed}" type="button" data-bs-toggle="collapse" data-bs-target="#collapse{svc_id}" aria-expanded="{str(svc['enabled']).lower()}">
+                {svc['name'].capitalize()} <span class="ms-2 {status_badge}">{svc['status']}</span>
+            </button>
+        </h2>
+        <div id="collapse{svc_id}" class="accordion-collapse collapse {expanded}" data-bs-parent="#serviceAccordion">
+            <div class="accordion-body">
+                <p><strong>Message:</strong> {svc['message']}</p>
+                <div class="row g-3">{source_card}{dest_cards}</div>
+                {table_html}
+            </div>
+        </div>
+    </div>
+    """
+
+# Summary calculations
+enabled_services = [s for s in data["services"] if s["enabled"]]
+upload_total = sum(s.get("upload_result", {}).get("duration_seconds", 0) for s in enabled_services)
+download_total = sum(sum(d.get("duration_seconds", 0) for d in s.get("download_results", [])) for s in enabled_services)
+report_time = data["message"].replace("Transfer finished at ", "")
+statuses = {svc["status"] for svc in data["services"]}
+if "Failed" in statuses:
+    overall_status = "Failed"
+elif "Success" in statuses and "Skipped" in statuses:
+    overall_status = "Mixed"
+else:
+    overall_status = "Success"
+
+summary_icon_class = {
+    "Success": "fas fa-check-circle text-success",
+    "Failed": "fas fa-times-circle text-danger",
+    "Mixed": "fas fa-exclamation-circle text-warning"
+}.get(overall_status, "fas fa-info-circle text-secondary")
+
+accordion_html = "".join(render_service_card(svc, i) for i, svc in enumerate(data["services"]))
+
+# HTML Output
+html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Service Transfer Report</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+
+<header class="bg-primary text-white text-center py-3">
+    <h2>Service Transfer Report</h2>
+</header>
+
+<div class="container mt-4">
+    <div class="card mb-3">
+        <div class="card-header bg-info text-white py-2">
+            <i class="{summary_icon_class}"></i> Summary Overview
+        </div>
+        <div class="card-body py-2">
+            <div class="row align-items-center">
+                <div class="col-md-8">
+                    <ul class="list-group list-group-flush small">
+                        <li class="list-group-item py-1"><i class="fas fa-cogs text-secondary me-2"></i><strong>Total Services:</strong> {len(data['services'])}</li>
+                        <li class="list-group-item py-1"><i class="fas fa-toggle-on text-success me-2"></i><strong>Enabled Services:</strong> {len(enabled_services)}</li>
+                        <li class="list-group-item py-1"><i class="fas fa-upload text-info me-2"></i><strong>Upload Duration:</strong> {upload_total:.2f} seconds</li>
+                        <li class="list-group-item py-1"><i class="fas fa-download text-primary me-2"></i><strong>Download Duration:</strong> {download_total:.2f} seconds</li>
+                        <li class="list-group-item py-1"><i class="fas fa-traffic-light text-warning me-2"></i><strong>Overall Status:</strong> {overall_status}</li>
+                        <li class="list-group-item py-1"><i class="fas fa-clock text-muted me-2"></i><strong>Generated At:</strong> {report_time}</li>
+                    </ul>
+                </div>
+                <div class="col-md-4 text-center">
+                    <div style="width: 200px; height: 200px; margin: auto;">
+                        <canvas id="timeChart" style="width: 200px; height: 200px;"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="accordion" id="serviceAccordion">
+        {accordion_html}
+    </div>
+</div>
+
+<footer class="bg-dark text-white text-center py-3 mt-4">
+    <p>&copy; 2025 Company Name. All rights reserved.</p>
+</footer>
+
+<script>
+    const canvas = document.getElementById('timeChart');
+    const ctx = canvas.getContext('2d');
+    const displayWidth = 120;
+    const displayHeight = 120;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = displayWidth * dpr;
+    canvas.height = displayHeight * dpr;
+    ctx.scale(dpr, dpr);
+
+    new Chart(ctx, {{
+        type: 'pie',
+        data: {{
+            labels: ['Upload', 'Download'],
+            datasets: [{{
+                data: [{upload_total:.2f}, {download_total:.2f}],
+                backgroundColor: ['#0dcaf0', '#0d6efd'],
+                borderColor: '#ffffff',
+                borderWidth: 2
+            }}]
+        }},
+        options: {{
+            responsive: false,
+            plugins: {{
+                legend: {{
+                    position: 'bottom',
+                    labels: {{
+                        boxWidth: 12,
+                        padding: 10
+                    }}
+                }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(context) {{
+                            return context.label + ': ' + context.parsed.toFixed(2) + 's';
+                        }}
+                    }}
+                }}
+            }}
+        }}
+    }});
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+"""
+
+# Write to file
+with open("report.html", "w", encoding="utf-8") as f:
+    f.write(html)
+
+print("✅ Report saved as report.html")

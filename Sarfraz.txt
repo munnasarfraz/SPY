@@ -1,3 +1,86 @@
+from concurrent.futures import ThreadPoolExecutor
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def lambda_handler(event, context):
+    # ... your existing code before thread execution
+
+    for service in services:
+        if not service['enabled']:
+            logger.info(f"Skipping disabled service: {service['name']}")
+            continue
+
+        logger.info(f"Processing service: {service['name']}")
+
+        # ... your existing upload logic
+
+        if upload_result['status'] != 'Success':
+            logger.error(f"Upload failed for service {service['name']} - skipping downloads.")
+            service_result['status'] = 'Error'
+            service_result['message'] = 'Upload failed; skipping destination downloads.'
+            service_result['download_results'] = []
+        else:
+            all_download_success = True
+            service_result['download_results'] = []
+
+            def thread_wrapper(dest_ssm_client, dest_s3_client, dest_instance, s3_bucket, service_name, timestamp, dest_path, dry_run):
+                logger.info(f"[{dest_instance}] Starting download and extraction")
+                result = process_destination_instance(dest_ssm_client, dest_s3_client, dest_instance, s3_bucket, service_name, timestamp, dest_path, dry_run)
+                logger.info(f"[{dest_instance}] Finished download and extraction with status: {result.get('status', 'Unknown')}")
+                return result
+
+            with ThreadPoolExecutor(max_workers=len(service['destinations'])) as executor:
+                futures = []
+                for destination in service['destinations']:
+                    dest_env = destination['environment']
+                    dest_session = get_session(dest_env)
+                    dest_ssm_client = dest_session.client('ssm')
+                    dest_s3_client = dest_session.client('s3')
+
+                    dest_instance = destination['instanceId']
+                    dest_path = destination['path']
+
+                    logger.info(f"Submitting download task for destination instance {dest_instance}")
+
+                    future = executor.submit(
+                        thread_wrapper,
+                        dest_ssm_client, dest_s3_client,
+                        dest_instance, s3_bucket,
+                        service['name'], timestamp,
+                        dest_path, dry_run
+                    )
+                    futures.append((future, destination))
+
+                for future, destination in futures:
+                    dest_instance = destination['instanceId']
+                    try:
+                        download_result = future.result()
+                        logger.info(f"Download task completed for destination instance {dest_instance} with status: {download_result['status']}")
+                    except Exception as e:
+                        logger.error(f"Exception in thread for destination instance {dest_instance}: {e}")
+                        download_result = {'status': 'Error', 'message': f'Thread exception: {e}'}
+
+                    service_result['download_results'].append({
+                        **destination,
+                        **download_result
+                    })
+
+                    if download_result['status'] != 'Success':
+                        all_download_success = False
+
+            service_result['status'] = 'Success' if all_download_success else 'Error'
+            service_result['message'] = 'Transfer completed' if all_download_success else 'Download failed for one or more destinations'
+
+    # ... your existing code after threads
+
+
+
+
+
+-----------------
+
 import boto3
 import time
 import logging

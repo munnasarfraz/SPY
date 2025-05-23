@@ -1,3 +1,222 @@
+h1. Data Transfer Automation Script Documentation
+
+!https://d1.awsstatic.com/logos/aws-logo-lockups/poweredbyaws/PB_AWS_logo_RGB_stacked_REV_SQ.91cd4af40773cbfbd15577a3c2b8a346fe3e8fa2.png!
+
+*Last updated:* {date}
+
+h2. Overview
+
+This Python-based automation script enables secure data transfer between EC2 instances using S3 as intermediate storage. It is built for large-scale, cross-environment transfers with support for service stopping/starting, splitting large archives, and multi-threaded S3 operations.
+
+*Use Cases:*
+- Data migration between AWS environments (e.g., DEV → UAT → PROD)
+- Backups before critical updates
+- Automated recovery replication
+- CI/CD related environment cloning
+
+*Benefits:*
+- Reduces manual effort and errors
+- Scales to large file sizes with split/merge logic
+- Works via AWS SSM (no SSH key needed)
+- Integrated error handling and logs
+
+h2. Prerequisites
+
+* AWS CLI installed and configured (with required profiles)
+* IAM roles for EC2 with:
+  * ssm:SendCommand
+  * s3:PutObject, s3:GetObject
+  * ec2:DescribeInstances
+* `pigz`, `tar`, `split`, `cat` available on EC2s
+* {Mermaid plugin installed in Confluence (if you want diagram rendering)}
+* Lambda/Script execution permissions (if automated)
+* CloudWatch logging enabled (recommended)
+
+h2. Manual Setup Steps (If Applicable)
+
+* Placeholder for setup guide: IAM roles, bucket creation, permissions.
+* Create/verify S3 bucket `{your-bucket}` with lifecycle policy.
+* Place script in automation environment (Lambda, local machine, EC2).
+* Test `aws ssm send-command` manually from CLI to verify role access.
+
+h2. Architecture Diagram
+
+{mermaid}
+graph TD
+    A[Source Instance] -->|1. Stop Services| B[Compress Data]
+    B --> C{Size > 5GB?}
+    C -->|Yes| D[Split Files]
+    C -->|No| E[Single Archive]
+    D --> F[Upload Parts to S3]
+    E --> F
+    F --> G[Destination Instance]
+    G -->|2. Download| H{Multiple Parts?}
+    H -->|Yes| I[Combine Files]
+    H -->|No| J[Extract Directly]
+    I --> J
+    J --> K[Start Services]
+{mermaid}
+
+h2. Technical Specifications
+
+|| Category || Details ||
+| Language | Python 3.9+ |
+| AWS Services | EC2, S3, Systems Manager (SSM) |
+| Compression | pigz (parallel gzip) |
+| Libraries | boto3, concurrent.futures, logging, os |
+| Threads | Configurable |
+
+h2. Configuration Constants
+
+{code:language=python}
+SPLIT_ON = 5 * 1024 * 1024 * 1024  # 5GB
+MNT_PATH = '/mnt'
+SSM_TIMEOUT = 1800
+SSM_INTERVAL = 5
+{code}
+
+h3. Input JSON Template
+
+{code:language=json}
+{
+  "dry_run": false,
+  "s3Bucket": "your-transfer-bucket",
+  "services": [
+    {
+      "enabled": true,
+      "name": "Service Name",
+      "source": {
+        "environment": "aws-profile",
+        "instanceId": "i-1234567890",
+        "path": "/source/path"
+      },
+      "destinations": [
+        {
+          "environment": "aws-profile",
+          "instanceId": "i-0987654321",
+          "path": "/destination/path"
+        }
+      ]
+    }
+  ]
+}
+{code}
+
+h2. Workflow Details
+
+h3. Source
+
+1. Stop services (via SSM)
+2. Compress data: `tar + pigz -p 4`
+3. Split if >5GB: `split -b 5G`
+
+h3. S3 Upload
+
+{code}
+aws s3 cp file s3://bucket/path/ --sse AES256
+{code}
+
+h3. Destination
+
+1. Download using ThreadPoolExecutor
+2. Combine parts (if needed): `cat part* > file.tar.gz`
+3. Extract: `tar -xzf file.tar.gz`
+4. Start services
+
+h2. Error Handling
+
+|| Error Type || Detection || Action ||
+| Disk Space | `df -k` check | Abort with cleanup tip |
+| SSM Fail | Status check | Retry 3x |
+| S3 Error | CLI return code | Log & skip |
+| Service Stop Fail | Process check | Warn and continue |
+
+h2. Performance Tuning
+
+{code:language=python}
+SPLIT_SIZE = 1 * 1024 * 1024 * 1024
+SSM_TIMEOUT = 3600
+{code}
+
+h2. Sample Report Output
+
+{code:language=json}
+{
+  "status": "done",
+  "results": [
+    {
+      "name": "Routing Engine",
+      "status": "Success",
+      "metrics": {
+        "transfer_size_gb": 12.7,
+        "compression_ratio": 3.2,
+        "total_time_sec": 428
+      },
+      "details": {
+        "source": "i-0591295a1783a221a",
+        "destinations": [
+          {
+            "instance": "i-057d31b7dfd13887d",
+            "throughput_mbps": 112.4
+          }
+        ]
+      }
+    }
+  ]
+}
+{code}
+
+h2. Troubleshooting
+
+|| Symptom || Diagnosis || Solution ||
+| SSM Timeout | CloudWatch | Increase timeout |
+| Partial Transfer | S3 logs | Use transfer acceleration |
+| Permission Errors | IAM Simulator | Add required permissions |
+
+h2. Appendix
+
+h3. A. Start/Stop Service Scripts
+
+{code:bash}
+# Start
+/opt/engine/scripts/start-engine.sh
+
+# Stop
+/opt/engine/scripts/stop-engine.sh
+{code}
+
+h3. B. Python Requirements
+
+{code}
+boto3==1.26.0
+concurrent-log-handler==0.9.20
+{code}
+
+h3. C. CloudWatch Monitoring Query
+
+{code:language=sql}
+STATS avg(duration) by bin(1h)
+FILTER @message LIKE /Processing/
+{code}
+
+---
+
+h3. Security Note
+
+* Rotate IAM credentials regularly
+* Review S3 policies post-deployment
+
+h3. Maintenance
+
+* Review this document quarterly
+* Update script for AWS API/version changes
+
+
+
+
+
+
+
 def verify_sizes(size_dict):
     logger.info("\n=== SIZE VERIFICATION ===")
     

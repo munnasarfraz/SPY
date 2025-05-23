@@ -1,3 +1,10 @@
+Here’s a compact paragraph version of icons for logs:
+
+Use ✅ for success, ❌ for error or failure, ⚠️ for warnings, ℹ️ for informational messages, 🔄 for process started, ⏳ for in progress, 🟢 for completed, 🛑 for stopped, ⏭️ for skipped, and 🔁 for retrying. For deployment and builds, use 🚀 for deployment, 🛠️ for build started, 🧱✅ for build success, 🧱❌ for build failure, 🔙 for rollback, 🧪 for tests running, 🧪✅ for test passed, and 🧪❌ for test failed. For security and access logs, use 🔐 for authentication, 🚫 for unauthorized access, and 🔒 for permission denied. Infrastructure icons include 🖥️🟢 for server up, 🖥️🔴 for server down, 🗄️✅ for database connected, 🗄️❌ for database error, 📤 for file uploaded, 📥 for file downloaded, 💾 for backup, and ♻️ for restore. In AI or automation contexts, 🤖 denotes AI decision-making and 📜 represents scripts running. For monitoring, use 📈 for tracking metrics, 🚨 for alerts, and 📝 for log entries.
+
+Let me know if you want this in a copy-paste-ready format like Python or JSON.
+
+
 def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
     try:
         # Create local destination path if not exists

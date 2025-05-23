@@ -1,3 +1,13 @@
+Exception ignored in: <function _DeleteDummyThreadOnDel.__del__ at 0x0000025D62287E20>
+Traceback (most recent call last):
+  File "c:\Users\atp1msa\AppData\Local\Programs\Python\Python313\Lib\threading.py", line 1383, in __del__
+TypeError: 'NoneType' object does not support the context manager protocol
+Exception ignored in: <function _DeleteDummyThreadOnDel.__del__ at 0x0000025D62287E20>
+Traceback (most recent call last):
+  File "c:\Users\atp1msa\AppData\Local\Programs\Python\Python313\Lib\threading.py", line 1383, in __del__
+TypeError: 'NoneType' object does not support the context manager protocol
+
+
 import boto3
 import time
 import logging

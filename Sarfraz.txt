@@ -1,3 +1,40 @@
+def verify_sizes(size_dict):
+    logger.info("\n=== SIZE VERIFICATION ===")
+    
+    # Get all values from the dictionary
+    sizes = list(size_dict.values())
+    
+    # Check if all values are equal (with tolerance for floating point differences)
+    all_match = all(abs(sizes[0] - size) / sizes[0] < 0.01 for size in sizes)  # 1% tolerance
+    
+    # Log each item
+    for instance, size in size_dict.items():
+        logger.info(f"{instance}: {size} bytes")
+    
+    # Log comparison results
+    if all_match:
+        logger.info("\nALL INSTANCES HAVE MATCHING SIZES (within 1% tolerance)")
+    else:
+        logger.info("\nWARNING: SIZE MISMATCHES DETECTED")
+        # Show differences
+        base_size = sizes[0]
+        for instance, size in size_dict.items():
+            diff = size - base_size
+            pct_diff = (diff / base_size) * 100
+            logger.info(f"{instance} differs by {abs(diff)} bytes ({abs(pct_diff):.2f}%) from {base_size}")
+    
+    logger.info("=== END VERIFICATION ===\n")
+
+# Example usage:
+size_dict = {
+    'source_xyz': 200,
+    'destination_abc': 200,
+    'destination_xyz': 201
+}
+
+verify_sizes(size_dict)
+
+
 Here’s a compact paragraph version of icons for logs:
 
 Use ✅ for success, ❌ for error or failure, ⚠️ for warnings, ℹ️ for informational messages, 🔄 for process started, ⏳ for in progress, 🟢 for completed, 🛑 for stopped, ⏭️ for skipped, and 🔁 for retrying. For deployment and builds, use 🚀 for deployment, 🛠️ for build started, 🧱✅ for build success, 🧱❌ for build failure, 🔙 for rollback, 🧪 for tests running, 🧪✅ for test passed, and 🧪❌ for test failed. For security and access logs, use 🔐 for authentication, 🚫 for unauthorized access, and 🔒 for permission denied. Infrastructure icons include 🖥️🟢 for server up, 🖥️🔴 for server down, 🗄️✅ for database connected, 🗄️❌ for database error, 📤 for file uploaded, 📥 for file downloaded, 💾 for backup, and ♻️ for restore. In AI or automation contexts, 🤖 denotes AI decision-making and 📜 represents scripts running. For monitoring, use 📈 for tracking metrics, 🚨 for alerts, and 📝 for log entries.

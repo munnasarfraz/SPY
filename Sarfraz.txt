@@ -1,3 +1,168 @@
+def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
+    try:
+        # Create local destination path if not exists
+        mkdir_cmd = f"mkdir -p {dest_path}"
+        run_ssm_command(ssm_client, instance_id, mkdir_cmd)
+
+        # Download files from S3
+        download_cmd = f'aws s3 cp "s3://{s3_bucket}/{s3_prefix}/" "{MNT_PATH}/" --recursive --only-show-errors'
+        run_ssm_command(ssm_client, instance_id, download_cmd)
+
+        # Check if download was successful by verifying files exist
+        list_files_cmd = f'ls "{MNT_PATH}/{zip_file_base}"* 2>/dev/null || echo "NO_FILES"'
+        files_output = run_ssm_command_and_get_output(ssm_client, instance_id, list_files_cmd)
+        
+        if "NO_FILES" in files_output:
+            error_msg = f"No files found for {zip_file_base} in S3 location s3://{s3_bucket}/{s3_prefix}/"
+            logger.error(error_msg)
+            return [False, error_msg]
+
+        if IS_SPLIT:
+            # Combine and extract split files
+            split_prefix = f"{MNT_PATH}/{zip_file_base}.part."
+            combined_file = f"{MNT_PATH}/{zip_file_base}.tar.gz"
+            
+            # Verify split parts exist
+            list_parts_cmd = f"ls {split_prefix}* 2>/dev/null || echo 'NO_SPLIT_PARTS'"
+            parts_output = run_ssm_command_and_get_output(ssm_client, instance_id, list_parts_cmd)
+            
+            if "NO_SPLIT_PARTS" in parts_output:
+                error_msg = f"No split parts found for {zip_file_base} in {MNT_PATH}"
+                logger.error(error_msg)
+                return [False, error_msg]
+
+            # Join split parts
+            join_cmd = f"ls {split_prefix}* | sort -V | xargs cat > {combined_file}"
+            run_ssm_command(ssm_client, instance_id, join_cmd)
+            
+            # Verify combined file was created
+            verify_combined_cmd = f'[ -f "{combined_file}" ] && echo "EXISTS" || echo "MISSING"'
+            verify_output = run_ssm_command_and_get_output(ssm_client, instance_id, verify_combined_cmd)
+            
+            if "MISSING" in verify_output:
+                error_msg = f"Failed to combine split parts for {zip_file_base}"
+                logger.error(error_msg)
+                return [False, error_msg]
+
+            # Remove split files
+            cleanup_cmd = f'rm -f "{split_prefix}*"'
+            run_ssm_command(ssm_client, instance_id, cleanup_cmd)
+        else:
+            combined_file = f"{MNT_PATH}/{zip_file_base}.tar.gz"
+            
+            # Verify single archive exists
+            verify_archive_cmd = f'[ -f "{combined_file}" ] && echo "EXISTS" || echo "MISSING"'
+            verify_output = run_ssm_command_and_get_output(ssm_client, instance_id, verify_archive_cmd)
+            
+            if "MISSING" in verify_output:
+                error_msg = f"Archive file {combined_file} not found"
+                logger.error(error_msg)
+                return [False, error_msg]
+
+        # Extract the tar.gz
+        extract_cmd = f'cd {dest_path} && tar -xzf "{combined_file}"'
+        run_ssm_command(ssm_client, instance_id, extract_cmd)
+        
+        # Verify extraction was successful
+        verify_extract_cmd = f'[ "$(ls -A {dest_path})" ] && echo "NOT_EMPTY" || echo "EMPTY"'
+        verify_output = run_ssm_command_and_get_output(ssm_client, instance_id, verify_extract_cmd)
+        
+        if "EMPTY" in verify_output:
+            error_msg = f"Extraction failed - destination directory {dest_path} is empty"
+            logger.error(error_msg)
+            return [False, error_msg]
+
+        # Remove archive after extraction
+        rm_cmd = f'rm -f "{combined_file}"'
+        run_ssm_command(ssm_client, instance_id, rm_cmd)
+
+        logger.info(f"Successfully downloaded and extracted {zip_file_base} to {dest_path}")
+        return [True, "Download and extraction completed successfully"]
+
+    except Exception as e:
+        error_msg = f"Failed to download/extract for {zip_file_base}: {str(e)}"
+        logger.error(error_msg)
+        return [False, error_msg]
+
+def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, service_folder, timestamp, dest_path, dry_run):
+    try:
+        bucket_size = 0
+        start_time = time.time()
+        if dry_run:
+            logger.info(f"[{service_folder}] Dry-run enabled. Skipping download.")
+            return {
+                'status': 'Success', 
+                'service': service_folder, 
+                'message': 'Dry-run: Download skipped',
+                'details': []
+            }
+
+        stop_status = service_via_ssm(ssm_client, instance_id, service_folder, 'stop')
+        if not stop_status:
+            return {
+                'status': 'Error', 
+                'service': service_folder, 
+                'message': f'Failed to stop: {service_folder} services',
+                'details': ['Service stop failed']
+            }
+
+        s3_prefix = f"temp/{timestamp}/{service_folder}"
+        bucket_size = get_s3_bucket_size(s3_client, s3_bucket, s3_prefix)
+        cleanup_directory(ssm_client, instance_id, dest_path)
+        available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, dest_path)
+
+        if available_size_in_bytes > bucket_size:
+            download_success, download_message = download_and_extract_files(
+                ssm_client, instance_id, s3_bucket, s3_prefix, 
+                service_folder, dest_path
+            )
+        else:          
+            difference_in_mb = (bucket_size - available_size_in_bytes) / (1024 * 1024)
+            error_msg = f"Insufficient disk space: {difference_in_mb:.2f} MB needed"
+            logger.error(f"Cleanup the instance [{instance_id}] at least [{difference_in_mb:.2f}] MB")
+            return {
+                'status': 'Error', 
+                'service': service_folder, 
+                'message': error_msg,
+                'details': [error_msg]
+            }
+
+        start_status = service_via_ssm(ssm_client, instance_id, service_folder, 'start')
+        if not start_status:
+            return {
+                'status': 'Error', 
+                'service': service_folder, 
+                'message': f'Failed to start: {service_folder} services',
+                'details': ['Service start failed']
+            }
+
+        duration = time.time() - start_time
+        if download_success:
+            return {
+                'status': 'Success',
+                'service': service_folder,
+                'message': f"Download and extraction completed for {service_folder}",
+                'details': [download_message],
+                'duration_seconds': duration
+            }
+        else:
+            return {
+                'status': 'Error',
+                'service': service_folder,
+                'message': f"Download failed for {service_folder}",
+                'details': [download_message],
+                'duration_seconds': duration
+            }
+
+    except Exception as e:
+        logger.error(f"Error processing destination for service {service_folder}: {e}")
+        return {
+            'status': 'Error', 
+            'service': service_folder, 
+            'message': f"Error: {str(e)}",
+            'details': [f"Unexpected error: {str(e)}"]
+        }
+
 def lambda_handler(event, context):
     # Add initial log with full event details
     logger.info(f"Script started with event: {json.dumps(event, indent=2)}")

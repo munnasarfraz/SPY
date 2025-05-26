@@ -6,18 +6,25 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import uuid
 
 '''Constants----------------------------------------------------------------------------'''
-SPLIT_ON = 5 * 1024 * 1024 * 1024  # 2 GB
-SPLIT_SIZE = 2 * 1024 * 1024 * 1024  # 1 GB
+SPLIT_ON = 5 * 1024 * 1024 * 1024  # 5 GB
+SPLIT_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 IS_SPLIT = False
 MNT_PATH = '/mnt'
 SSM_TIMEOUT = 1800
 SSM_INTERVAL = 5
+TAKE_BACKUP = True
+BACKUP_PATH = '/mnt/Backup_timestamps/'
 '''-------------------------------------------------------------------------------------'''
 
 '''log setup----------------------------------------------------------------------------'''
-logging.basicConfig(level=logging.INFO)  # Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 '''-------------------------------------------------------------------------------------'''
 
@@ -52,14 +59,14 @@ def lambda_handler(event, context):
     s3_bucket = event['s3Bucket']
     services = event.get("services", [])
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    logger.info(f"📜 - Script started | Multi-threaded: {multi_threaded}")
+    logger.info(f"📜 Starting execution | Multi-threaded: {multi_threaded} | Dry-run: {dry_run}")
     results = []
     overall_start_time = time.time()
 
     for service in services:
         service_name = service['name']
         if not service.get('enabled', False):
-            logger.info(f"⏭️ - Skipping disabled service: {service_name}")
+            logger.info(f"⏭️ Skipping disabled service: {service_name}")
             results.append({
                 "enabled": False,
                 "name": service_name,
@@ -71,7 +78,7 @@ def lambda_handler(event, context):
             })
             continue
 
-        logger.info(f"🔄- Processing service: {service_name}")
+        logger.info(f"🔄 Processing service: {service_name}")
         start_time = time.time()
         service_result = {
             "enabled": True,
@@ -97,7 +104,7 @@ def lambda_handler(event, context):
         service_result["upload_result"] = upload_result
 
         if upload_result['status'] != 'Success':
-            logger.error(f"❌- Upload failed for service {service_name}")
+            logger.error(f"❌ Upload failed for service {service_name}: {upload_result['message']}")
             service_result['status'] = 'Failed'
             service_result['message'] = 'Transfer failed'
             service_result['duration_seconds'] = upload_result.get('duration_seconds', 0)
@@ -107,17 +114,17 @@ def lambda_handler(event, context):
         all_download_success = True
 
         def thread_wrapper(dest_ssm_client, dest_s3_client, dest_instance, s3_bucket, service_name, timestamp, dest_path, dry_run):
-            logger.info(f"📥 [{dest_instance}] Starting download and extract")
+            logger.info(f"📥 [{dest_instance}] Starting download and extract for service {service_name}")
             result = process_destination_instance(
                 dest_ssm_client, dest_s3_client,
                 dest_instance, s3_bucket,
                 service_name, timestamp, dest_path, dry_run
             )
-            logger.info(f"✅ [{dest_instance}] Finished with status: {result.get('status')}")
+            logger.info(f"✅ [{dest_instance}] Download and extract completed with status: {result.get('status')}")
             return result
 
         if multi_threaded:
-            logger.info(f"Using MULTI-THREADED mode for service: {service_name}")
+            logger.info(f"🔄 Processing destinations in MULTI-THREADED mode for service: {service_name}")
             with ThreadPoolExecutor(max_workers=len(service['destinations'])) as executor:
                 futures = []
                 for destination in service['destinations']:
@@ -128,7 +135,7 @@ def lambda_handler(event, context):
                     dest_instance = destination['instanceId']
                     dest_path = destination['path']
 
-                    logger.info(f"Submitting thread for {dest_instance}")
+                    logger.info(f"Submitting thread for destination {dest_instance}")
                     future = executor.submit(
                         thread_wrapper,
                         dest_ssm_client, dest_s3_client,
@@ -153,21 +160,21 @@ def lambda_handler(event, context):
                         }
                         logger.info(f"Completed thread for {dest_instance} with status: {download_result['status']}")
                     except Exception as e:
-                        logger.error(f"❌ Thread failed for {dest_instance}: {e}")
+                        logger.error(f"❌ Thread failed for {dest_instance}: {str(e)}", exc_info=True)
                         download_result = {
                             'environment': destination['environment'],
                             'instanceId': destination['instanceId'],
                             'path': destination['path'],
                             'status': 'Failed',
                             'service': service_name,
-                            'message': f'Thread exception: {e}',
+                            'message': f'Thread exception: {str(e)}',
                             'duration_seconds': 0
                         }
                     service_result['download_results'].append(download_result)
                     if download_result['status'] != 'Success':
                         all_download_success = False
         else:
-            logger.info(f"Using SEQUENTIAL mode for service: {service_name}")
+            logger.info(f"🔄 Processing destinations in SEQUENTIAL mode for service: {service_name}")
             for destination in service['destinations']:
                 dest_env = destination['environment']
                 dest_session = get_session(dest_env)
@@ -194,14 +201,14 @@ def lambda_handler(event, context):
                         'duration_seconds': download_result['duration_seconds']
                     }
                 except Exception as e:
-                    logger.error(f"❌ Sequential error for {dest_instance}: {e}")
+                    logger.error(f"❌ Sequential error for {dest_instance}: {str(e)}", exc_info=True)
                     download_result = {
                         'environment': destination['environment'],
                         'instanceId': destination['instanceId'],
                         'path': destination['path'],
                         'status': 'Failed',
                         'service': service_name,
-                        'message': f'Sequential exception: {e}',
+                        'message': f'Sequential exception: {str(e)}',
                         'duration_seconds': 0
                     }
 
@@ -215,7 +222,7 @@ def lambda_handler(event, context):
         service_result['duration_seconds'] = time.time() - start_time
         results.append(service_result)
 
-    logger.info("✅ Execution completed")
+    logger.info("✅ Execution completed in %.2f seconds", time.time() - overall_start_time)
     verify_sizes(size_tracker)
 
     return {
@@ -225,22 +232,22 @@ def lambda_handler(event, context):
     }
 
 def verify_sizes(size_dict):
-    logger.info("size verification")
+    logger.info("🔍 Verifying sizes of transferred data")
     sizes = list(size_dict.values())
     all_match = all(abs(sizes[0] - size) / sizes[0] < 0.01 for size in sizes) if sizes else True
 
     for instance, size in size_dict.items():
-        logger.info(f"{instance}: {size} bytes")
+        logger.info(f"📏 {instance}: {size:,} bytes ({size/1024/1024:.2f} MB)")
 
     if all_match and sizes:
-        logger.info("All db copies are matching (within 1% tolerance)")
+        logger.info("✅ All database copies match within 1% tolerance")
     else:
-        logger.info("WARNING: Size mismatches detected")
+        logger.warning("⚠️ Size mismatches detected")
         base_size = sizes[0] if sizes else 0
         for instance, size in size_dict.items():
             diff = size - base_size
             pct_diff = (diff / base_size) * 100 if base_size else 0
-            logger.info(f"{instance} differs by {abs(diff)} bytes ({abs(pct_diff):.2f}%) from {base_size}")
+            logger.info(f"📉 {instance} differs by {abs(diff):,} bytes ({abs(pct_diff):.2f}% from {base_size:,})")
 
 '''service_via_ssm---------------------------------------------------------------------------
 Executes specified action (start/stop) on a given service using AWS Systems Manager (SSM).
@@ -269,18 +276,18 @@ def service_via_ssm(ssm_client, instance_id, service, action):
             status, output = run_ssm_command_and_get_multiple_output(ssm_client, instance_id, command)
             duration = time.time() - start_time
             logger.info(f"✅ Service {service} {action} completed in {duration:.2f} seconds")
-            logger.debug(f"Command output: {output}")
+            logger.debug(f"Command output for {service} {action}: {output}")
             if status == 'Success':
-                logger.info(f"✅ {action.capitalize()} command for {service} executed successfully.")
+                logger.info(f"✅ {action.capitalize()} command for {service} executed successfully")
                 return True
             else:
                 logger.error(f"❌ Failed to execute {action} command for {service}. Status: {output}")
                 return False
         else:
-            logger.error(f"❌ No command found for {service} with action {action}.")
+            logger.error(f"❌ No command found for {service} with action {action}")
             return False
     except Exception as e:
-        logger.error(f"❌ Failed to {action} service {service} on instance {instance_id}: {str(e)}")
+        logger.error(f"❌ Failed to {action} service {service} on instance {instance_id}: {str(e)}", exc_info=True)
         return False
 
 '''get_available_size_via_ssm----------------------------------------------------------------
@@ -290,13 +297,15 @@ Returns: int: The available size in bytes at the specified path. Returns 0 if an
 ------------------------------------------------------------------------------------------'''
 def get_available_size_via_ssm(ssm_client, instance_id, source_path):
     mkdir_cmd = f"mkdir -p {source_path}"
-    run_ssm_command(ssm_client, instance_id, mkdir_cmd)
     try:
+        run_ssm_command(ssm_client, instance_id, mkdir_cmd)
         cmd = f"df -k {source_path} | tail -1 | awk '{{print $4}}'"
         output = run_ssm_command_and_get_output(ssm_client, instance_id, cmd)
         size_in_bytes = int(output.strip()) * 1024
+        logger.debug(f"Available size at {source_path} on {instance_id}: {size_in_bytes:,} bytes")
         return size_in_bytes
-    except:
+    except Exception as e:
+        logger.error(f"❌ Failed to get available size for {source_path} on {instance_id}: {str(e)}", exc_info=True)
         return 0
 
 '''process_source_instance-------------------------------------------------------------------
@@ -313,7 +322,7 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
         
         start_time = time.time()
         dir_size = get_directory_size_via_ssm(ssm_client, instance_id, source_path)
-        logger.info(f"✅ [{service_folder}] db dumps size: {dir_size} bytes ({dir_size/1024:.2f} KB)")
+        logger.info(f"✅ [{service_folder}] Source directory size: {dir_size:,} bytes ({dir_size/1024/1024:.2f} MB)")
         size_tracker['Source_' + instance_id] = dir_size
 
         if dry_run:
@@ -332,15 +341,17 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
         if available_size_in_bytes > dir_size:
             if dir_size > SPLIT_ON:
                 IS_SPLIT = True
+                logger.info(f"[{service_folder}] Splitting directory due to size {dir_size:,} bytes > {SPLIT_ON:,} bytes")
                 split_files = split_directory_via_ssm(ssm_client, instance_id, source_path, sanitized_service_name)
             else:
                 IS_SPLIT = False
+                logger.info(f"[{service_folder}] Compressing directory (size {dir_size:,} bytes <= {SPLIT_ON:,} bytes)")
                 split_files = compress_directory_via_ssm(ssm_client, instance_id, source_path, sanitized_service_name)
         else:
-            logger.warning(f"Disk space issue - available disk space [{available_size_in_bytes}] expected disk space: {dir_size} bytes")
+            logger.warning(f"⚠️ Disk space issue - available: {available_size_in_bytes:,} bytes, required: {dir_size:,} bytes")
             difference_in_bytes = dir_size - available_size_in_bytes
             difference_in_mb = difference_in_bytes / (1024 * 1024)
-            logger.error(f"❌ Cleanup the instance [{instance_id}] at least [{difference_in_mb:.2f}] MB")
+            logger.error(f"❌ Insufficient disk space on {instance_id}. Need {difference_in_mb:.2f} MB more")
             return {'status': 'Failed', 'service': service_folder, 'message': f'Insufficient disk space: {difference_in_mb:.2f} MB needed', 'duration_seconds': time.time() - start_time}
 
         logger.info(f"[{service_folder}] Starting service...")
@@ -351,28 +362,32 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
         logger.info(f"🟢 [{service_folder}] Service started successfully")
 
         if not split_files:
+            logger.error(f"❌ [{service_folder}] No archive created")
             return {'status': 'Failed', 'service': service_folder, 'message': 'No archive created', 'duration_seconds': time.time() - start_time}
 
         s3_prefix = f"temp/{timestamp}/{sanitized_service_name}"
         
-        logger.info(f"📤 Uploading started for [{s3_bucket}]")
+        logger.info(f"📤 Uploading started to s3://{s3_bucket}/{s3_prefix}")
         upload_results = [upload_file_to_s3_via_ssm(ssm_client, instance_id, f, s3_bucket, s3_prefix) for f in split_files]
 
         cleanup_temp_files(ssm_client, instance_id, split_files)
 
         if not all(upload_results):
+            logger.error(f"❌ [{service_folder}] Upload failed for one or more files")
             return {'status': 'Failed', 'service': service_folder, 'message': 'Upload failed', 'duration_seconds': time.time() - start_time}
 
         duration = time.time() - start_time
+        logger.info(f"✅ [{service_folder}] Upload completed in {duration:.2f} seconds")
         return {'status': 'Success', 'service': service_folder, 'message': 'Upload completed', 'duration_seconds': duration}
 
     except Exception as e:
+        duration = time.time() - start_time
         if 'The SSO session associated with this profile has expired or is otherwise invalid' in str(e):
-            logger.error(f"🔒 To log in to AWS SSO using the command line, command: [aws sso login --profile env]")
-            return {'status': 'Failed', 'service': service_folder, 'message': 'SSO login failed', 'duration_seconds': time.time() - start_time}
+            logger.error(f"🔒 SSO session expired for {service_folder}. Run: aws sso login --profile env")
+            return {'status': 'Failed', 'service': service_folder, 'message': 'SSO login failed', 'duration_seconds': duration}
         else:
-            logger.exception(f"[{service_folder}] Critical error in process_source_instance")
-            return {'status': 'Failed', 'service': service_folder, 'message': f"Error: {str(e)}", 'duration_seconds': time.time() - start_time}
+            logger.error(f"❌ Critical error in process_source_instance for {service_folder}: {str(e)}", exc_info=True)
+            return {'status': 'Failed', 'service': service_folder, 'message': f"Error: {str(e)}", 'duration_seconds': duration}
 
 '''process_destination_instance------------------------------------------------------------
 Processes the destination instance by stopping services, checking available disk space, downloading and extracting files from S3,
@@ -383,7 +398,7 @@ Returns: dict: Contains the status, service name, message, and duration of the d
 def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, service_folder, timestamp, dest_path, dry_run):
     try:
         sanitized_service_name = sanitize_service_name(service_folder)
-        logger.info(f"⏳[{service_folder}] Starting destination processing for instance {instance_id}")
+        logger.info(f"⏳ [{service_folder}] Starting destination processing for instance {instance_id}")
         logger.debug(f"Destination path: {dest_path}, S3 bucket: {s3_bucket}, Timestamp: {timestamp}")
         start_time = time.time()
         if dry_run:
@@ -395,36 +410,46 @@ def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, 
         if not stop_status:
             logger.error(f"🛑 [{service_folder}] Failed to stop service")
             return {'status': 'Failed', 'service': service_folder, 'message': f'Failed to stop: {service_folder} services', 'duration_seconds': time.time() - start_time}
-        logger.info(f"🟢[{service_folder}] Service stopped successfully")
+        logger.info(f"🟢 [{service_folder}] Service stopped successfully")
 
         s3_prefix = f"temp/{timestamp}/{sanitized_service_name}"
         bucket_size = get_s3_bucket_size(s3_client, s3_bucket, s3_prefix)
-        logger.info(f"[{service_folder}] S3 bucket size: {bucket_size} bytes ({bucket_size/1024:.2f} KB)")
+        logger.info(f"[{service_folder}] S3 bucket size: {bucket_size:,} bytes ({bucket_size/1024/1024:.2f} MB)")
+
+        available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, dest_path)
+        if available_size_in_bytes <= bucket_size:
+            logger.warning(f"⚠️ Disk space issue - available: {available_size_in_bytes:,} bytes, required: {bucket_size:,} bytes")
+            difference_in_bytes = bucket_size - available_size_in_bytes
+            difference_in_mb = difference_in_bytes / (1024 * 1024)
+            logger.error(f"❌ Insufficient disk space on {instance_id}. Need {difference_in_mb:.2f} MB more")
+            return {'status': 'Failed', 'service': service_folder, 'message': f'Insufficient disk space: {difference_in_mb:.2f} MB needed', 'duration_seconds': time.time() - start_time}
+
+        if TAKE_BACKUP:
+            logger.info(f"[{service_folder}] Creating backup of {dest_path} to {BACKUP_PATH}")
+            backup_success, backup_message = backup_directory(ssm_client, instance_id, dest_path, service_folder, timestamp)
+            if not backup_success:
+                logger.error(f"❌ [{service_folder}] Backup failed: {backup_message}")
+                return {'status': 'Failed', 'service': service_folder, 'message': f'Backup failed: {backup_message}', 'duration_seconds': time.time() - start_time}
+            logger.info(f"✅ [{service_folder}] Backup completed: {backup_message}")
 
         logger.info(f"[{service_folder}] Cleaning up destination directory {dest_path}")
         cleanup_directory(ssm_client, instance_id, dest_path)
-        available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, dest_path)
 
-        if available_size_in_bytes > bucket_size:
-            download_success, download_message = download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, sanitized_service_name, dest_path)
-            dir_size = get_directory_size_via_ssm(ssm_client, instance_id, dest_path)
-            size_tracker['destination_' + instance_id] = dir_size
-        else:
-            logger.warning(f"Disk space issue - available disk space [{available_size_in_bytes}] expected disk space: {bucket_size} bytes")
-            difference_in_bytes = bucket_size - available_size_in_bytes
-            difference_in_mb = difference_in_bytes / (1024 * 1024)
-            logger.error(f"❌ Cleanup the instance [{instance_id}] at least [{difference_in_mb:.2f}] MB")
-            return {'status': 'Failed', 'service': service_folder, 'message': f'Insufficient disk space: {difference_in_mb:.2f} MB needed', 'duration_seconds': time.time() - start_time}
+        download_success, download_message = download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, sanitized_service_name, dest_path)
+        dir_size = get_directory_size_via_ssm(ssm_client, instance_id, dest_path)
+        size_tracker['destination_' + instance_id] = dir_size
+        logger.info(f"[{service_folder}] Destination directory size: {dir_size:,} bytes ({dir_size/1024/1024:.2f} MB)")
 
         logger.info(f"[{service_folder}] Starting service...")
         start_status = service_via_ssm(ssm_client, instance_id, service_folder, 'start')
         if not start_status:
-            logger.error(f"🛑[{service_folder}] Failed to start service")
+            logger.error(f"🛑 [{service_folder}] Failed to start service")
             return {'status': 'Failed', 'service': service_folder, 'message': f'Failed to start: {service_folder} services', 'duration_seconds': time.time() - start_time}
         logger.info(f"🟢 [{service_folder}] Service started successfully")
 
         duration = time.time() - start_time
         if download_success:
+            logger.info(f"✅ [{service_folder}] Download and extraction completed in {duration:.2f} seconds")
             return {
                 'status': 'Success',
                 'service': service_folder,
@@ -432,21 +457,51 @@ def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, 
                 'duration_seconds': duration
             }
         else:
+            logger.error(f"❌ [{service_folder}] Download failed: {download_message}")
             return {
                 'status': 'Failed',
                 'service': service_folder,
-                'message': f'Download failed for {service_folder}',
+                'message': f'Download failed: {download_message}',
                 'duration_seconds': duration
             }
 
     except Exception as e:
-        logger.error(f"❌ Error processing destination for service {service_folder}: {e}")
+        duration = time.time() - start_time
+        logger.error(f"❌ Error processing destination for service {service_folder}: {str(e)}", exc_info=True)
         return {
             'status': 'Failed',
             'service': service_folder,
             'message': f'Error: {str(e)}',
-            'duration_seconds': time.time() - start_time
+            'duration_seconds': duration
         }
+
+'''backup_directory-------------------------------------------------------------------------
+Backs up the destination directory to the specified backup path with a timestamp.
+Parameters: ssm_client, instance_id, dir_path, service_folder, timestamp
+Returns: list: [success_bool, message]
+------------------------------------------------------------------------------------------'''
+def backup_directory(ssm_client, instance_id, dir_path, service_folder, timestamp):
+    try:
+        sanitized_service_name = sanitize_service_name(service_folder)
+        backup_dir = f"{BACKUP_PATH}{timestamp}/{sanitized_service_name}"
+        mkdir_cmd = f"mkdir -p {backup_dir}"
+        run_ssm_command(ssm_client, instance_id, mkdir_cmd)
+        logger.debug(f"Created backup directory {backup_dir} on {instance_id}")
+
+        # Check if directory is empty
+        check_cmd = f"[ -z \"$(ls -A {dir_path})\" ] && echo 'empty' || echo 'not_empty'"
+        output = run_ssm_command_and_get_output(ssm_client, instance_id, check_cmd).strip()
+        if output == 'empty':
+            logger.info(f"[{service_folder}] Directory {dir_path} is empty, no backup needed")
+            return [True, f"No backup needed for empty directory {dir_path}"]
+
+        backup_cmd = f'cd {dir_path} && tar -cf - . | pigz -p 4 > {backup_dir}/{sanitized_service_name}.tar.gz'
+        run_ssm_command(ssm_client, instance_id, backup_cmd)
+        logger.info(f"✅ [{service_folder}] Backed up {dir_path} to {backup_dir}/{sanitized_service_name}.tar.gz")
+        return [True, f"Backed up {dir_path} to {backup_dir}/{sanitized_service_name}.tar.gz"]
+    except Exception as e:
+        logger.error(f"❌ Failed to backup {dir_path} for {service_folder}: {str(e)}", exc_info=True)
+        return [False, f"Backup error: {str(e)}"]
 
 '''run_ssm_command_and_get_output------------------------------------------------------------
 Executes a shell command on an instance using AWS Systems Manager (SSM) and retrieves the output.
@@ -471,10 +526,10 @@ def run_ssm_command_and_get_output(ssm_client, instance_id, command):
                 if output['Status'] != 'Success':
                     logger.error(f"❌ SSM command failed on {instance_id}: {output['StandardErrorContent']}")
                     raise Exception(output['StandardErrorContent'])
-                logger.debug(f"SSM command succeeded on {instance_id}")
+                logger.debug(f"SSM command succeeded on {instance_id}: {output['StandardOutputContent']}")
                 return output['StandardOutputContent']
     except Exception as e:
-        logger.error(f"❌ SSM command execution failed on {instance_id}: {str(e)}")
+        logger.error(f"❌ SSM command execution failed on {instance_id}: {str(e)}", exc_info=True)
         raise
 
 '''run_ssm_command_and_get_multiple_output---------------------------------------------------
@@ -484,20 +539,27 @@ Returns: tuple: Contains the status of the command execution and the standard ou
 Raises: Exception: If the command execution fails or does not succeed.
 ------------------------------------------------------------------------------------------'''
 def run_ssm_command_and_get_multiple_output(ssm_client, instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=SSM_TIMEOUT,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(int(SSM_TIMEOUT / SSM_INTERVAL)):
-        time.sleep(SSM_INTERVAL)
-        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return output['Status'], output['StandardOutputContent']
+    try:
+        logger.debug(f"Executing SSM command on {instance_id}: {command}")
+        response = ssm_client.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': [command]},
+            TimeoutSeconds=SSM_TIMEOUT,
+        )
+        command_id = response['Command']['CommandId']
+        for _ in range(int(SSM_TIMEOUT / SSM_INTERVAL)):
+            time.sleep(SSM_INTERVAL)
+            output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+            if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+                if output['Status'] != 'Success':
+                    logger.error(f"❌ SSM command failed on {instance_id}: {output['StandardErrorContent']}")
+                    raise Exception(output['StandardErrorContent'])
+                logger.debug(f"SSM command succeeded on {instance_id}")
+                return output['Status'], output['StandardOutputContent']
+    except Exception as e:
+        logger.error(f"❌ SSM command execution failed on {instance_id}: {str(e)}", exc_info=True)
+        raise
 
 '''run_ssm_command---------------------------------------------------------------------------
 Executes a shell command on an instance using AWS Systems Manager (SSM).
@@ -506,20 +568,27 @@ Returns: None
 Raises: Exception: If the command execution fails or does not succeed.
 ------------------------------------------------------------------------------------------'''
 def run_ssm_command(ssm_client, instance_id, command):
-    response = ssm_client.send_command(
-        InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': [command]},
-        TimeoutSeconds=SSM_TIMEOUT,
-    )
-    command_id = response['Command']['CommandId']
-    for _ in range(int(SSM_TIMEOUT / SSM_INTERVAL)):
-        time.sleep(SSM_INTERVAL)
-        output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
-            if output['Status'] != 'Success':
-                raise Exception(output['StandardErrorContent'])
-            return
+    try:
+        logger.debug(f"Executing SSM command on {instance_id}: {command}")
+        response = ssm_client.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': [command]},
+            TimeoutSeconds=SSM_TIMEOUT,
+        )
+        command_id = response['Command']['CommandId']
+        for _ in range(int(SSM_TIMEOUT / SSM_INTERVAL)):
+            time.sleep(SSM_INTERVAL)
+            output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+            if output['Status'] in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+                if output['Status'] != 'Success':
+                    logger.error(f"❌ SSM command failed on {instance_id}: {output['StandardErrorContent']}")
+                    raise Exception(output['StandardErrorContent'])
+                logger.debug(f"SSM command succeeded on {instance_id}")
+                return
+    except Exception as e:
+        logger.error(f"❌ SSM command execution failed on {instance_id}: {str(e)}", exc_info=True)
+        raise
 
 '''get_directory_size_via_ssm----------------------------------------------------------------
 Retrieves the size of a directory on an instance using AWS Systems Manager (SSM).
@@ -527,9 +596,15 @@ Parameters: ssm_client, instance_id, source_path
 Returns: int: The size of the directory in bytes.
 ------------------------------------------------------------------------------------------'''
 def get_directory_size_via_ssm(ssm_client, instance_id, source_path):
-    cmd = f"du -sb {source_path} | cut -f1"
-    output = run_ssm_command_and_get_output(ssm_client, instance_id, cmd)
-    return int(output.strip())
+    try:
+        cmd = f"du -sb {source_path} | cut -f1"
+        output = run_ssm_command_and_get_output(ssm_client, instance_id, cmd)
+        size = int(output.strip())
+        logger.debug(f"Directory size for {source_path} on {instance_id}: {size:,} bytes")
+        return size
+    except Exception as e:
+        logger.error(f"❌ Failed to get directory size for {source_path} on {instance_id}: {str(e)}", exc_info=True)
+        return 0
 
 '''split_directory_via_ssm--------------------------------------------------------------------
 Compresses and splits a directory into smaller parts on an instance using AWS Systems Manager (SSM).
@@ -541,6 +616,7 @@ def split_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base)
     tar_path = f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"
     split_prefix = f"{MNT_PATH}/{sanitized_zip_file_base}.part."
 
+    logger.info(f"[{zip_file_base}] Compressing and splitting directory {source_path}")
     cmd_compress = f'cd "{source_path}" && tar -cf - . | pigz -p 4 > "{tar_path}"'
     run_ssm_command(ssm_client, instance_id, cmd_compress)
 
@@ -549,7 +625,9 @@ def split_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base)
 
     list_cmd = f'ls "{split_prefix}*"'
     output = run_ssm_command_and_get_output(ssm_client, instance_id, list_cmd)
-    return output.strip().split('\n')
+    split_files = output.strip().split('\n')
+    logger.info(f"[{zip_file_base}] Split files created: {split_files}")
+    return split_files
 
 '''compress_directory_via_ssm-----------------------------------------------------------------
 Compresses a directory into a tar.gz file on an instance using AWS Systems Manager (SSM).
@@ -560,7 +638,9 @@ def compress_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_ba
     sanitized_zip_file_base = sanitize_service_name(zip_file_base)
     cmd = f'cd {source_path} && tar -cf - . | pigz -p 4 > "{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"'
     run_ssm_command(ssm_client, instance_id, cmd)
-    return [f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"]
+    compressed_file = f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"
+    logger.info(f"[{zip_file_base}] Compressed directory to {compressed_file}")
+    return [compressed_file]
 
 '''upload_file_to_s3_via_ssm-----------------------------------------------------------------
 Uploads a file to S3 using an SSM command.
@@ -573,10 +653,10 @@ def upload_file_to_s3_via_ssm(ssm_client, instance_id, file_path, s3_bucket, s3_
     cmd = f'aws s3 cp "{file_path}" "s3://{s3_bucket}/{s3_key}" --only-show-errors'
     try:
         run_ssm_command(ssm_client, instance_id, cmd)
-        logger.info(f"Uploaded {filename} to s3://{s3_bucket}/{s3_key}")
+        logger.info(f"✅ Uploaded {filename} to s3://{s3_bucket}/{s3_key}")
         return True
     except Exception as e:
-        logger.error(f"❌ Upload failed for {filename}: {e}")
+        logger.error(f"❌ Upload failed for {filename}: {str(e)}", exc_info=True)
         return False
 
 '''cleanup_temp_files------------------------------------------------------------------------
@@ -589,9 +669,9 @@ def cleanup_temp_files(ssm_client, instance_id, file_paths):
         cmd = f'rm -f "{file_path}"'
         try:
             run_ssm_command(ssm_client, instance_id, cmd)
-            logger.info(f"Cleaned up {file_path}")
+            logger.info(f"✅ Cleaned up temporary file {file_path}")
         except Exception as e:
-            logger.warning(f"Failed to clean up {file_path}: {e}")
+            logger.warning(f"⚠️ Failed to clean up {file_path}: {str(e)}", exc_info=True)
 
 '''cleanup_directory-------------------------------------------------------------------------
 Cleans up the destination directory by removing all files.
@@ -602,11 +682,9 @@ def cleanup_directory(ssm_client, instance_id, dir_paths):
     cmd = f'rm -rf "{dir_paths}/*"'
     try:
         run_ssm_command(ssm_client, instance_id, cmd)
-        logger.info(f"Successfully cleaned up {dir_paths}")
-    except ssm_client.exceptions.CommandFailed as e:
-        logger.error(f"❌ SSM command failed for {dir_paths}: {e}")
+        logger.info(f"✅ Successfully cleaned up directory {dir_paths}")
     except Exception as e:
-        logger.warning(f"Failed to clean up {dir_paths}: {e}")
+        logger.error(f"❌ Failed to clean up {dir_paths}: {str(e)}", exc_info=True)
 
 '''get_s3_bucket_size------------------------------------------------------------------------
 Calculates the total size of objects in an S3 bucket under a specific prefix.
@@ -614,12 +692,17 @@ Parameters: s3_client, bucket_name, prefix
 Returns: int: Total size in bytes.
 ------------------------------------------------------------------------------------------'''
 def get_s3_bucket_size(s3_client, bucket_name, prefix=''):
-    paginator = s3_client.get_paginator('list_objects_v2')
-    total_size = 0
-    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            total_size += obj['Size']
-    return total_size
+    try:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        total_size = 0
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for obj in page.get('Contents', []):
+                total_size += obj['Size']
+        logger.debug(f"S3 bucket size for {bucket_name}/{prefix}: {total_size:,} bytes")
+        return total_size
+    except Exception as e:
+        logger.error(f"❌ Failed to get S3 bucket size for {bucket_name}/{prefix}: {str(e)}", exc_info=True)
+        return 0
 
 '''download_and_extract_files----------------------------------------------------------------
 Downloads and extracts files from S3 to the destination instance.
@@ -632,7 +715,7 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
         mkdir_cmd = f"mkdir -p {dest_path}"
         run_ssm_command(ssm_client, instance_id, mkdir_cmd)
 
-        logger.info(f"📥 Download started from [{s3_bucket}]")
+        logger.info(f"📥 Downloading files from s3://{s3_bucket}/{s3_prefix}")
         download_cmd = f'aws s3 cp "s3://{s3_bucket}/{s3_prefix}/" "{MNT_PATH}/" --recursive --only-show-errors'
         run_ssm_command(ssm_client, instance_id, download_cmd)
 
@@ -643,6 +726,7 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
             parts_output = run_ssm_command_and_get_output(ssm_client, instance_id, list_parts_cmd)
 
             if parts_output.strip():
+                logger.info(f"[{zip_file_base}] Joining split files: {parts_output.strip()}")
                 join_cmd = f"ls {split_prefix}* | sort -V | xargs cat > {combined_file}"
                 run_ssm_command(ssm_client, instance_id, join_cmd)
                 cleanup_cmd = f'rm -f "{split_prefix}*"'
@@ -650,6 +734,7 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
         else:
             combined_file = f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"
 
+        logger.info(f"[{zip_file_base}] Extracting files to {dest_path}")
         extract_cmd = f'cd {dest_path} && tar -xzf "{combined_file}"'
         run_ssm_command(ssm_client, instance_id, extract_cmd)
 
@@ -660,7 +745,7 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
         return [True, f"Download and extraction completed for {zip_file_base}"]
 
     except Exception as e:
-        logger.error(f"❌ Failed to download/extract for {zip_file_base}: {e}")
+        logger.error(f"❌ Failed to download/extract for {zip_file_base}: {str(e)}", exc_info=True)
         return [False, f"Error: {str(e)}"]
 
 '''main--------------------------------------------------------------------------------------
@@ -671,9 +756,8 @@ if __name__ == "__main__":
     event_path = script_dir / "event" / "event.json"
     with event_path.open() as f:
         test_event = json.load(f)
-    logger.info(f"📜 Script started with event: {json.dumps(test_event, indent=2)}")
+    logger.info(f"📜 Starting local execution with event: {json.dumps(test_event, indent=2)}")
     results = lambda_handler(test_event, None)
-    logger.info(f"ℹ️ output: {json.dumps(results, indent=4)}")
     logger.info(f"🟢 Execution completed. Results summary: {json.dumps(results, indent=2)}")
 
     output_dir = Path("output")
@@ -682,7 +766,7 @@ if __name__ == "__main__":
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"db_copy_output_{timestamp}.json"
     file_path = output_dir / filename
-    file_path = script_dir / "output" / filename
     
     with file_path.open("w") as f:
         json.dump(results, f, indent=2)
+    logger.info(f"📝 Output saved to {file_path}")

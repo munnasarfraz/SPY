@@ -21,6 +21,14 @@ logging.basicConfig(level=logging.INFO)  # Setup logging
 logger = logging.getLogger(__name__)
 '''-------------------------------------------------------------------------------------'''
 
+'''sanitize_service_name--------------------------------------------------------------------
+Sanitize service name by replacing spaces and special characters with underscores.
+Args:    service_name (str): The original service name.
+Returns: str: The sanitized service name.
+------------------------------------------------------------------------------------------'''
+def sanitize_service_name(service_name):
+    return service_name.replace(' ', '_').replace('/', '_').replace('\\', '_')
+
 '''get_session------------------------------------------------------------------------------
 Retrieve or create a boto3 session for the given profile name.
 Args:    profile_name (str): The name of the AWS profile to use.
@@ -134,7 +142,6 @@ def lambda_handler(event, context):
                     dest_instance = destination['instanceId']
                     try:
                         download_result = future.result()
-                        # Remove 'details' field and merge destination info
                         download_result = {
                             'environment': destination['environment'],
                             'instanceId': destination['instanceId'],
@@ -237,8 +244,7 @@ def verify_sizes(size_dict):
 
 '''service_via_ssm---------------------------------------------------------------------------
 Executes specified action (start/stop) on a given service using AWS Systems Manager (SSM).
-Parameters: ssm_client (boto3.client): The SSM client to execute commands.  instance_id (str): The ID of the instance where the service is running.
-            service (str): The name of the service to be managed.   action (str): The action to perform on the service ('start' or 'stop').
+Parameters: ssm_client, instance_id, service, action
 Returns:    bool: True if the command executed successfully, False otherwise.
 ------------------------------------------------------------------------------------------'''
 def service_via_ssm(ssm_client, instance_id, service, action):
@@ -279,8 +285,8 @@ def service_via_ssm(ssm_client, instance_id, service, action):
 
 '''get_available_size_via_ssm----------------------------------------------------------------
 Retrieve the available size at the specified path on an instance using AWS Systems Manager (SSM).
-Parameters:     ssm_client (boto3.client): The SSM client to execute commands.  instance_id (str): The ID of the instance where the directory is located.   source_path (str): The path to the directory on the instance.
-Returns: int:    The available size in bytes at the specified path. Returns 0 if an error occurs.
+Parameters: ssm_client, instance_id, source_path
+Returns: int: The available size in bytes at the specified path. Returns 0 if an error occurs.
 ------------------------------------------------------------------------------------------'''
 def get_available_size_via_ssm(ssm_client, instance_id, source_path):
     mkdir_cmd = f"mkdir -p {source_path}"
@@ -296,12 +302,12 @@ def get_available_size_via_ssm(ssm_client, instance_id, source_path):
 '''process_source_instance-------------------------------------------------------------------
 Processes the source instance, checking available disk space, compressing or splitting files,
 uploading to S3, and restarting services using AWS Systems Manager (SSM).
-Parameters:     ssm_client (boto3.client): The SSM client to execute commands.   s3_client (boto3.client): The S3 client to upload files.    instance_id (str): The ID of the source instance.   source_path (str): The path to the directory on the source instance.
-                s3_bucket (str): The name of the S3 bucket for uploads. service_folder (str): The name of the service folder.   timestamp (str): The current timestamp for naming files.    dry_run (bool): Indicates if the function should run in dry-run mode.
-Returns:        dict: Contains the status, service name, message, and duration of the upload process.
+Parameters: ssm_client, s3_client, instance_id, source_path, s3_bucket, service_folder, timestamp, dry_run
+Returns: dict: Contains the status, service name, message, and duration of the upload process.
 ------------------------------------------------------------------------------------------'''
 def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_bucket, service_folder, timestamp, dry_run):
     try:
+        sanitized_service_name = sanitize_service_name(service_folder)
         logger.info(f"⏳ [{service_folder}] Starting source processing for instance {instance_id}")
         logger.debug(f"Source path: {source_path}, S3 bucket: {s3_bucket}, Timestamp: {timestamp}")
         
@@ -326,10 +332,10 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
         if available_size_in_bytes > dir_size:
             if dir_size > SPLIT_ON:
                 IS_SPLIT = True
-                split_files = split_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
+                split_files = split_directory_via_ssm(ssm_client, instance_id, source_path, sanitized_service_name)
             else:
                 IS_SPLIT = False
-                split_files = compress_directory_via_ssm(ssm_client, instance_id, source_path, service_folder)
+                split_files = compress_directory_via_ssm(ssm_client, instance_id, source_path, sanitized_service_name)
         else:
             logger.warning(f"Disk space issue - available disk space [{available_size_in_bytes}] expected disk space: {dir_size} bytes")
             difference_in_bytes = dir_size - available_size_in_bytes
@@ -347,7 +353,7 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
         if not split_files:
             return {'status': 'Failed', 'service': service_folder, 'message': 'No archive created', 'duration_seconds': time.time() - start_time}
 
-        s3_prefix = f"temp/{timestamp}/{service_folder}"
+        s3_prefix = f"temp/{timestamp}/{sanitized_service_name}"
         
         logger.info(f"📤 Uploading started for [{s3_bucket}]")
         upload_results = [upload_file_to_s3_via_ssm(ssm_client, instance_id, f, s3_bucket, s3_prefix) for f in split_files]
@@ -371,13 +377,12 @@ def process_source_instance(ssm_client, s3_client, instance_id, source_path, s3_
 '''process_destination_instance------------------------------------------------------------
 Processes the destination instance by stopping services, checking available disk space, downloading and extracting files from S3,
 and restarting services using AWS Systems Manager (SSM).
-Parameters:     ssm_client (boto3.client): The SSM client to execute commands.  s3_client (boto3.client): The S3 client to download files.
-                instance_id (str): The ID of the destination instance.  s3_bucket (str): The name of the S3 bucket for downloads.   service_folder (str): The name of the service folder.
-                timestamp (str): The current timestamp for naming files.    dest_path (str): The path to the directory on the destination instance. dry_run (bool): Indicates if the function should run in dry-run mode.
-Returns:        dict gata: Contains the status, service name, message, and duration of the download process.
+Parameters: ssm_client, s3_client, instance_id, s3_bucket, service_folder, timestamp, dest_path, dry_run
+Returns: dict: Contains the status, service name, message, and duration of the download process.
 ------------------------------------------------------------------------------------------'''
 def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, service_folder, timestamp, dest_path, dry_run):
     try:
+        sanitized_service_name = sanitize_service_name(service_folder)
         logger.info(f"⏳[{service_folder}] Starting destination processing for instance {instance_id}")
         logger.debug(f"Destination path: {dest_path}, S3 bucket: {s3_bucket}, Timestamp: {timestamp}")
         start_time = time.time()
@@ -392,7 +397,7 @@ def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, 
             return {'status': 'Failed', 'service': service_folder, 'message': f'Failed to stop: {service_folder} services', 'duration_seconds': time.time() - start_time}
         logger.info(f"🟢[{service_folder}] Service stopped successfully")
 
-        s3_prefix = f"temp/{timestamp}/{service_folder}"
+        s3_prefix = f"temp/{timestamp}/{sanitized_service_name}"
         bucket_size = get_s3_bucket_size(s3_client, s3_bucket, s3_prefix)
         logger.info(f"[{service_folder}] S3 bucket size: {bucket_size} bytes ({bucket_size/1024:.2f} KB)")
 
@@ -401,7 +406,7 @@ def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, 
         available_size_in_bytes = get_available_size_via_ssm(ssm_client, instance_id, dest_path)
 
         if available_size_in_bytes > bucket_size:
-            download_success, download_message = download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, service_folder, dest_path)
+            download_success, download_message = download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, sanitized_service_name, dest_path)
             dir_size = get_directory_size_via_ssm(ssm_client, instance_id, dest_path)
             size_tracker['destination_' + instance_id] = dir_size
         else:
@@ -445,9 +450,9 @@ def process_destination_instance(ssm_client, s3_client, instance_id, s3_bucket, 
 
 '''run_ssm_command_and_get_output------------------------------------------------------------
 Executes a shell command on an instance using AWS Systems Manager (SSM) and retrieves the output.
-Parameters: ssm_client (boto3.client): The SSM client to execute commands. instance_id (str): The ID of the instance where the command is executed. command (str): The shell command to execute.
-Returns:    str: The standard output content of the executed command.
-Raises:     Exception: If the command execution fails or does not succeed.
+Parameters: ssm_client, instance_id, command
+Returns: str: The standard output content of the executed command.
+Raises: Exception: If the command execution fails or does not succeed.
 ------------------------------------------------------------------------------------------'''
 def run_ssm_command_and_get_output(ssm_client, instance_id, command):
     try:
@@ -474,9 +479,9 @@ def run_ssm_command_and_get_output(ssm_client, instance_id, command):
 
 '''run_ssm_command_and_get_multiple_output---------------------------------------------------
 Executes a shell command on an instance using AWS Systems Manager (SSM) and retrieves the status and output.
-Parameters: ssm_client (boto3.client): The SSM client to execute commands.  instance_id (str): The ID of the instance where the command is executed.    command (str): The shell command to execute.
-Returns:    tuple: Contains the status of the command execution and the standard output content.
-Raises:     Exception: If the command execution fails or does not succeed.
+Parameters: ssm_client, instance_id, command
+Returns: tuple: Contains the status of the command execution and the standard output content.
+Raises: Exception: If the command execution fails or does not succeed.
 ------------------------------------------------------------------------------------------'''
 def run_ssm_command_and_get_multiple_output(ssm_client, instance_id, command):
     response = ssm_client.send_command(
@@ -496,9 +501,9 @@ def run_ssm_command_and_get_multiple_output(ssm_client, instance_id, command):
 
 '''run_ssm_command---------------------------------------------------------------------------
 Executes a shell command on an instance using AWS Systems Manager (SSM).
-Parameters: ssm_client (boto3.client): The SSM client to execute commands.  instance_id (str): The ID of the instance where the command is executed.    command (str): The shell command to execute.
-Returns:    None
-Raises:     Exception: If the command execution fails or does not succeed.
+Parameters: ssm_client, instance_id, command
+Returns: None
+Raises: Exception: If the command execution fails or does not succeed.
 ------------------------------------------------------------------------------------------'''
 def run_ssm_command(ssm_client, instance_id, command):
     response = ssm_client.send_command(
@@ -518,8 +523,8 @@ def run_ssm_command(ssm_client, instance_id, command):
 
 '''get_directory_size_via_ssm----------------------------------------------------------------
 Retrieves the size of a directory on an instance using AWS Systems Manager (SSM).
-Parameters: ssm_client (boto3.client): The SSM client to execute commands.  instance_id (str): The ID of the instance where the directory is located.   source_path (str): The path to the directory on the instance.
-Returns:    int: The size of the directory in bytes.
+Parameters: ssm_client, instance_id, source_path
+Returns: int: The size of the directory in bytes.
 ------------------------------------------------------------------------------------------'''
 def get_directory_size_via_ssm(ssm_client, instance_id, source_path):
     cmd = f"du -sb {source_path} | cut -f1"
@@ -528,13 +533,13 @@ def get_directory_size_via_ssm(ssm_client, instance_id, source_path):
 
 '''split_directory_via_ssm--------------------------------------------------------------------
 Compresses and splits a directory into smaller parts on an instance using AWS Systems Manager (SSM).
-Parameters: ssm_client (boto3.client): The SSM client to execute commands.instance_id (str): The ID of the instance where the directory is located.
-            source_path (str): The path to the directory on the instance.   zip_file_base (str): The base name for the compressed and split files.
-Returns:    list: A list of paths to the split parts of the compressed archive.
+Parameters: ssm_client, instance_id, source_path, zip_file_base
+Returns: list: A list of paths to the split parts of the compressed archive.
 ------------------------------------------------------------------------------------------'''
 def split_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base):
-    tar_path = f"{MNT_PATH}/{zip_file_base}.tar.gz"
-    split_prefix = f"{MNT_PATH}/{zip_file_base}.part."
+    sanitized_zip_file_base = sanitize_service_name(zip_file_base)
+    tar_path = f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"
+    split_prefix = f"{MNT_PATH}/{sanitized_zip_file_base}.part."
 
     cmd_compress = f'cd "{source_path}" && tar -cf - . | pigz -p 4 > "{tar_path}"'
     run_ssm_command(ssm_client, instance_id, cmd_compress)
@@ -549,17 +554,18 @@ def split_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base)
 '''compress_directory_via_ssm-----------------------------------------------------------------
 Compresses a directory into a tar.gz file on an instance using AWS Systems Manager (SSM).
 Parameters: ssm_client, instance_id, source_path, zip_file_base
-Returns:    list: A list containing the path to the compressed archive.
+Returns: list: A list containing the path to the compressed archive.
 ------------------------------------------------------------------------------------------'''
 def compress_directory_via_ssm(ssm_client, instance_id, source_path, zip_file_base):
-    cmd = f'cd {source_path} && tar -cf - . | pigz -p 4 > "{MNT_PATH}/{zip_file_base}.tar.gz"'
+    sanitized_zip_file_base = sanitize_service_name(zip_file_base)
+    cmd = f'cd {source_path} && tar -cf - . | pigz -p 4 > "{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"'
     run_ssm_command(ssm_client, instance_id, cmd)
-    return [f"{MNT_PATH}/{zip_file_base}.tar.gz"]
+    return [f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"]
 
 '''upload_file_to_s3_via_ssm-----------------------------------------------------------------
 Uploads a file to S3 using an SSM command.
 Parameters: ssm_client, instance_id, file_path, s3_bucket, s3_prefix
-Returns:    bool: True if upload succeeds, False otherwise.
+Returns: bool: True if upload succeeds, False otherwise.
 ------------------------------------------------------------------------------------------'''
 def upload_file_to_s3_via_ssm(ssm_client, instance_id, file_path, s3_bucket, s3_prefix):
     filename = os.path.basename(file_path)
@@ -576,7 +582,7 @@ def upload_file_to_s3_via_ssm(ssm_client, instance_id, file_path, s3_bucket, s3_
 '''cleanup_temp_files------------------------------------------------------------------------
 Removes temporary files from the instance.
 Parameters: ssm_client, instance_id, file_paths
-Returns:    None
+Returns: None
 ------------------------------------------------------------------------------------------'''
 def cleanup_temp_files(ssm_client, instance_id, file_paths):
     for file_path in file_paths:
@@ -590,7 +596,7 @@ def cleanup_temp_files(ssm_client, instance_id, file_paths):
 '''cleanup_directory-------------------------------------------------------------------------
 Cleans up the destination directory by removing all files.
 Parameters: ssm_client, instance_id, dir_paths
-Returns:    None
+Returns: None
 ------------------------------------------------------------------------------------------'''
 def cleanup_directory(ssm_client, instance_id, dir_paths):
     cmd = f'rm -rf "{dir_paths}/*"'
@@ -605,7 +611,7 @@ def cleanup_directory(ssm_client, instance_id, dir_paths):
 '''get_s3_bucket_size------------------------------------------------------------------------
 Calculates the total size of objects in an S3 bucket under a specific prefix.
 Parameters: s3_client, bucket_name, prefix
-Returns:    int: Total size in bytes.
+Returns: int: Total size in bytes.
 ------------------------------------------------------------------------------------------'''
 def get_s3_bucket_size(s3_client, bucket_name, prefix=''):
     paginator = s3_client.get_paginator('list_objects_v2')
@@ -618,10 +624,11 @@ def get_s3_bucket_size(s3_client, bucket_name, prefix=''):
 '''download_and_extract_files----------------------------------------------------------------
 Downloads and extracts files from S3 to the destination instance.
 Parameters: ssm_client, instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path
-Returns:    list: [success_bool, message]
+Returns: list: [success_bool, message]
 ------------------------------------------------------------------------------------------'''
 def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zip_file_base, dest_path):
     try:
+        sanitized_zip_file_base = sanitize_service_name(zip_file_base)
         mkdir_cmd = f"mkdir -p {dest_path}"
         run_ssm_command(ssm_client, instance_id, mkdir_cmd)
 
@@ -630,8 +637,8 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
         run_ssm_command(ssm_client, instance_id, download_cmd)
 
         if IS_SPLIT:
-            split_prefix = f"{MNT_PATH}/{zip_file_base}.part."
-            combined_file = f"{MNT_PATH}/{zip_file_base}.tar.gz"
+            split_prefix = f"{MNT_PATH}/{sanitized_zip_file_base}.part."
+            combined_file = f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"
             list_parts_cmd = f"ls {split_prefix}* 2>/dev/null"
             parts_output = run_ssm_command_and_get_output(ssm_client, instance_id, list_parts_cmd)
 
@@ -641,7 +648,7 @@ def download_and_extract_files(ssm_client, instance_id, s3_bucket, s3_prefix, zi
                 cleanup_cmd = f'rm -f "{split_prefix}*"'
                 run_ssm_command(ssm_client, instance_id, cleanup_cmd)
         else:
-            combined_file = f"{MNT_PATH}/{zip_file_base}.tar.gz"
+            combined_file = f"{MNT_PATH}/{sanitized_zip_file_base}.tar.gz"
 
         extract_cmd = f'cd {dest_path} && tar -xzf "{combined_file}"'
         run_ssm_command(ssm_client, instance_id, extract_cmd)

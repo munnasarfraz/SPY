@@ -1,3 +1,24 @@
+def delete_s3_prefix_via_ssm(ssm_client, instance_id, bucket_name, prefix=None):
+    try:
+        logger.info(f"🗑️ Deleting all objects in s3://{bucket_name} via SSM on {instance_id}")
+        cmd = f'aws s3 rm "s3://{bucket_name}/" --recursive --only-show-errors'
+        run_ssm_command(ssm_client, instance_id, cmd)
+        logger.info(f"✅ Successfully deleted all objects in s3://{bucket_name}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to delete objects in s3://{bucket_name}: {str(e)}", exc_info=True)
+        return False
+
+{
+    "Effect": "Allow",
+    "Action": ["s3:DeleteObject", "s3:ListBucket"],
+    "Resource": [
+        "arn:aws:s3:::your-bucket-name",
+        "arn:aws:s3:::your-bucket-name/*"
+    ]
+}
+
+
 '''delete_s3_prefix_objects-----------------------------------------------------------------
 Deletes all objects in the S3 bucket under the specified prefix.
 Parameters: s3_client, bucket_name, prefix

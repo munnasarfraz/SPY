@@ -1,3 +1,45 @@
+'''delete_s3_prefix_objects-----------------------------------------------------------------
+Deletes all objects in the S3 bucket under the specified prefix.
+Parameters: s3_client, bucket_name, prefix
+Returns: bool: True if deletion succeeds, False otherwise.
+------------------------------------------------------------------------------------------'''
+def delete_s3_prefix_objects(s3_client, bucket_name, prefix):
+    try:
+        logger.info(f"🗑️ Deleting objects in s3://{bucket_name}/{prefix}")
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+        
+        objects_to_delete = {'Objects': []}
+        for page in pages:
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    objects_to_delete['Objects'].append({'Key': obj['Key']})
+        
+        if objects_to_delete['Objects']:
+            s3_client.delete_objects(Bucket=bucket_name, Delete=objects_to_delete)
+            logger.info(f"✅ Successfully deleted objects in s3://{bucket_name}/{prefix}")
+        else:
+            logger.info(f"ℹ️ No objects found in s3://{bucket_name}/{prefix}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to delete objects in s3://{bucket_name}/{prefix}: {str(e)}", exc_info=True)
+        return False
+
+
+
+# Delete S3 objects if transfer was successful and not in dry-run mode
+if all_download_success and not dry_run:
+    s3_prefix = f"temp/{timestamp}/{sanitize_service_name(service_name)}"
+    if not delete_s3_prefix_objects(source_s3_client, s3_bucket, s3_prefix):
+        logger.warning(f"⚠️ Failed to delete S3 objects for {service_name} at s3://{s3_bucket}/{s3_prefix}")
+        service_result['message'] += '; S3 cleanup failed'
+        service_result['status'] = 'Failed'
+
+
+
+
+
+
 import boto3
 import time
 import logging

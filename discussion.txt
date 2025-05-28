@@ -1,0 +1,756 @@
+Transcript
+May 28, 2025, 10:01AM
+
+Munna Ahmad started transcription
+
+Munna Ahmad   0:04
+A couple of things which I want to understand.
+See if I'm talking about the test hardness.
+So only I know the definition, so it's I'm not aware of.
+The what is the expectations and what should I do into that test hardness so these things basically these are these things are coming into my mind.
+So which I need to discuss with yours.
+
+Boyan Hristov   0:29
+Yeah, sure.
+Let me first try to explain in general what's and even some historical references.
+Why it's here, what it was built for, and so on.
+
+Munna Ahmad   0:38
+Yep, right.
+
+Boyan Hristov   0:40
+Oh yeah, let me.
+Let me start with that.
+
+Munna Ahmad   0:43
+Sure. Thank you.
+
+Boyan Hristov   0:45
+Share my screen.
+Oh.
+So all right, so the test harness.
+This is just the front end of it.
+
+Munna Ahmad   1:06
+OK.
+
+Boyan Hristov   1:07
+Was created for testing the engine versus external systems.
+
+Munna Ahmad   1:12
+OK.
+
+Boyan Hristov   1:13
+Engine is a pricing system built in house by a typical.
+Which is still the core product and we are currently replacing it with another system and we are repurposing this test harness to.
+To support this migration so it's lifespanis.
+Is limited, so we are going gonna get rid of it after the migration is complete or it will be repurposed to use external systems because the test harness is automation that is comparing to systems.
+So we currently have two systems. We have the engine and we have the new system and the moment we.
+Discontinue the engine. There will be no.
+Need for comparison or it will not be possible?
+So we'll need to compare with external systems like Camadas and Travelport, or the data that is coming from.
+Another division in the company.
+Which is doing exactly that, collecting data from from the industry.
+So.
+The.
+This system.
+Has a lot of functionality which we are currently not using at all.
+So we focus mostly on this in the first part here.
+Because it was built for testing the engine and now it's working in the opposite direction.
+We are testing the new system versus the engine.
+Any questions? So far I have.
+
+Munna Ahmad   3:08
+No, no, no.
+Just trying to understand what you are talking.
+Still no, no question.
+
+Boyan Hristov   3:15
+Alright, so comparison.
+What we are comparing actually?
+Let me open one comparison.
+So we are comparing mostly.
+The the pricing part.
+So before we had things like.
+Regressions.
+Regression distributions.
+Different scenarios even.
+Multidate comparison. So we currently use only this pricing part and the pricing part.
+Is basically this string here.
+Which is.
+The YQ, which is carrier impulse fees calculated by the system.
+Ayato taxes, base fare, etc.
+The calculation of I'm not sure how familiar you are with airline pricing, but it's extremely complex process.
+Which is going through millions of records validation process and at the end it's doing currency conversion and so on and it's yeah it and on on top of it it's there is no single source of truth.
+So even if you have very accurate system.
+All other system could systems could return different result.
+Inaccurate one, but you need to make decisions how to align everything.
+This is Q is the engine.
+We, we call it Q from calendar query because that was the name of the API we used in the past.
+
+Munna Ahmad   5:10
+OK.
+
+Boyan Hristov   5:11
+We changed it to another API and it turned out the names of the APIs are a bit different internally this is P4 API and before it was using P5API.
+So the P5 is more like a shopping API and P4 is more.
+Oh.
+Tariff management oriented.
+So this is the response returned from from the engine API. So you see there and this is the response we have on our side.
+From from the new system, so they have some similarities, but they are structured very differently so and the code that is doing this comparison is.
+Really bad because it's grew organically, but it was never proposed to be production great.
+It's always been in some kind of a motion.
+Constantly changing.
+And the final result of this comparison is this here, which is our focus currently.
+
+Munna Ahmad   6:24
+OK.
+
+Boyan Hristov   6:26
+Which is extracting differences on this pricing here because the system is comparing all.
+The records from the pricing solution pricing solution is.
+Basically a ticket.
+Starting from the segments.
+Which we have here. Segments are flights.
+
+Munna Ahmad   6:50
+Mm hmm.
+
+Boyan Hristov   6:52
+Fares rbd's everything, fair basis code and once there is a match on.
+This level on the pricing solution, which is the something like the input of the pricing, we compare only the the output of the pricing which is here.
+I can.
+I will show you some more sophisticated comp showing not that sophisticated but.
+With greater discrepancy.
+
+Munna Ahmad   7:23
+OK.
+
+Boyan Hristov   7:23
+See here we have discrepancies.
+On different taxes, for example.
+Wy tax.
+We have this discrepancy so.
+The goal of this?
+Exercise of the task is not to change anything on this system, but to get this response here which is in Jason format.
+And store it in a relational database which can be queried.
+For the business requirement is to be able to do analysis of the discrepancies.
+Which we have here.
+Some analysis.
+But currently the system is stopped.
+I I need to go back in time to to get.
+Some.
+Some data probably.
+So this information, we don't want to invest in improving this analytics here. We want to completely move it outside of the system and strip down the system to only doing the the comparison but not.
+The analysis.
+Yeah.
+The system has runners.
+It has some, so this is just the front end. There is a back end and we it's using MongoDB to store the results which is really hard to.
+For analytic purposes.
+And for now, we are not planning to build front end for the.
+For this analysis, for now, we just want to store it in a in a database.
+So the there is only one place where this thing is happening.
+So changes to this code will require very simple.
+Just adding some additional.
+Insert.
+Query to the database connection to the database in a certain set.
+Query to the database.
+And the database structure should be relatively simple because.
+Something like.
+Like this?
+Total price yqyr or this example here?
+I'm not sure if I close it.
+Not, yeah, I'll open another one.
+So we have total price yqyr and ttbs ttbs stands for.
+Something like.
+Ticketing text box service.
+Something like that, but it's basically at the taxes.
+And that's it. So how?
+Any questions so far?
+
+Munna Ahmad   10:54
+No so far, but.
+Once you complete this then then we'll discuss on that how we can implement our solution in order to proceed further.
+So till now I'm fine with the informations now.
+
+Boyan Hristov   11:06
+Yeah.
+OK, I'm gonna switch to the actual to the how we are gonna do that.
+
+Munna Ahmad   11:15
+Yep.
+
+Boyan Hristov   11:16
+So we have a project.
+In our.
+Test here.
+In our Git lab.
+In under the test group.
+This is the test harness here.
+0.
+This is the application and it's Python.
+
+Munna Ahmad   11:43
+Hmm.
+
+Boyan Hristov   11:44
+Send a.
+Here in the app is the Python code.
+And infrastructure which is terraform scripts.
+So you don't need.
+One of the rules we we try to follow here is no manual changes to our cloud infrastructure.
+Everything should happen through terraform and the Terraform should happen only through pipelines because.
+Git lab is keeping the states.
+So here in the.
+Oh yeah, each project has its own states, so no execution of.
+
+Munna Ahmad   12:30
+OK.
+
+Boyan Hristov   12:33
+Of Terraform scripts from local machines or from any outside.
+Server is allowed only through commit.
+To.
+Git lab.
+So.
+Infrastructure.
+I have the document DB.
+Here we have the EC2 instance here that they're very well structured as long as.
+As much as Terraform allows that.
+Which includes.
+I am the EC2 instance here.
+Networks, et cetera. DNS records.
+As well, which is using a service catalog to provision.
+
+Munna Ahmad   13:27
+Hmm.
+
+Boyan Hristov   13:28
+So what we you need to do is to create another module for.
+Our RDS for example.
+Whatever you you believe is the right approach.
+And.
+And it should be.
+It should be the cheapest option, so some elastic option which is not because.
+The analytics will not happen constantly.
+It will be on demand.
+So whenever.
+Option is the best for this.
+I didn't mind any analysis, but.
+I believe it's something you should do.
+So the once you provision the database.
+You need to change the.
+You need to design it.
+Create the the structure. That should also happen through the code.
+I think.
+SQL Alchemy should be good option here because this this application is Django. Here the front end is Django, the back end is.
+
+Munna Ahmad   14:47
+OK.
+
+Boyan Hristov   14:51
+On this pure Python.
+I.
+
+Munna Ahmad   14:55
+Probably back in would be in the Django, I think.
+
+Boyan Hristov   14:59
+I'm not sure because the the the goal is not to use.
+Django for to connect the Django for to the database. It would be great if we incorporate any the analytics here to to make the make it better for the.
+For the business people to use it, but it's not.
+The most important stuff.
+Unless you you you find it easier for you to have the.
+The database definitions in in junk.
+And yeah.
+The let me show you how it looks from the application side.
+So here we have.
+This master.
+Pie, which is running the the runners.
+So this it's an application that is spawning.
+Sub processes which are working in parallel to go over scenarios. You don't need to change anything here.
+And each runner.
+Is is calling this compare script here. So there is a lot of that code here because it was.
+The application was repurposed.
+It's calling this comparepi and your change should happen here.
+I can probably point you to the line where this is going to happen.
+I think.
+We should search this insert.
+Yep.
+Here.
+So a typical CNP in the CMP, the insertion in CMP table.
+So we need to create another.
+Not my some SQL here.
+And which is using. This should use this structure.
+Kim it itinerary choosing Mongo escape.
+Which is in the OK.
+You you figure it out.
+It's not it's spaghetti code.
+That should not be. If you start from here, it should be pretty straightforward.
+It's just a Jason structure.
+You need to to insert.
+Oh.
+I think.
+Yeah. And the front end.
+The front end is starting from.
+This web server sh here.
+No, this is this is the loco test with Docker, but in the cloud it's running like.
+So first, this is the the deployment.
+Not sure this is the pipeline.
+Let's call 3.
+So it's creating the EMI with Packer.
+It's performing in the telephone.
+So.
+You need to look at the at the Packer file 'cause. It's packing all the.
+The application in AMI.
+And your connects is the machine through our automation.
+Have.
+Here the application is deploying opt.
+There are two Optus harness chilli.
+And there are two system D services.
+And then test on this back end.
+And front end.
+I can see them in insistent D.
+System this harness front end is this one.
+From here you can see how it started.
+It's this is the execution.
+Line. This is the working directory and here are the locks. So if you open.
+This thing here.
+If it's locked at this level.
+Rolling and to restart.
+To see something happening there.
+And here it is.
+Madison, thank you for the for the back end.
+
+Munna Ahmad   21:32
+Hmm.
+
+Boyan Hristov   21:43
+Which also.
+Requires that because the web rotate is probably stopping it.
+The back end is stopped anyway.
+Because I I stopped the runners.
+Because we need to.
+We are currently migrating the the system to another account. The system which this is calling.
+And yeah, that's that's pretty much it.
+How it's how it's working?
+And 1:18.
+
+Munna Ahmad   22:23
+Have shown me so far you have shown me back in and frontier system. So these tricks are there.
+But it's still my question is that.
+What towards the if I'm talking about tasks towards the harness, So what I need to do actually?
+
+Boyan Hristov   22:48
+Yeah.
+
+Munna Ahmad   22:49
+There's a couple of things.
+
+Boyan Hristov   22:51
+I showed you.
+You need to go to this.
+To the test harness application.
+
+Munna Ahmad   23:04
+Right.
+
+Boyan Hristov   23:06
+In.
+Nap.
+
+Munna Ahmad   23:11
+Right.
+
+Boyan Hristov   23:12
+Compare π here.
+And.
+I used C here in Python.
+And go to this.
+Line number 834 and insert this structure.
+Into a square database which?
+Is required to be provisioned.
+
+Munna Ahmad   23:40
+I think I think that's your screen is getting fast.
+
+Boyan Hristov   23:42
+Through.
+Sergian please.
+
+Munna Ahmad   23:50
+The screen is freezed.
+
+Boyan Hristov   23:54
+Hmm.
+
+Munna Ahmad   23:57
+Can you reset? Yeah, no.
+
+Boyan Hristov   23:57
+So.
+
+Munna Ahmad   23:59
+Now it's fine.
+Yes, no, no, it's fine.
+
+Boyan Hristov   24:02
+Yeah.
+
+Munna Ahmad   24:02
+Please, please go ahead.
+
+Boyan Hristov   24:03
+Yes.
+
+Munna Ahmad   24:03
+So here you can see the some SQL queries here right?
+
+Boyan Hristov   24:08
+Yeah, we need to.
+Yeah, we need to create something like.
+
+Munna Ahmad   24:15
+Mm hmm.
+
+Boyan Hristov   24:16
+Like this?
+
+Munna Ahmad   24:26
+Basically you you want to file some query.
+
+Boyan Hristov   24:27
+Hmm.
+
+Munna Ahmad   24:30
+And data database would be the same which is already configured into the.
+Back end right?
+Or do I need to use an additional database?
+
+Boyan Hristov   24:40
+Now first you need to provision to create a database in order to create a database, you need to to use the the Terraform.
+Terraform is script language which describes infrastructure.
+So just like.
+We have here in.
+Modules. We have EC2 instance.
+For example.
+Here we have.
+The AMI we have.
+The VPC.
+I have the subnets.
+And.
+The test harness easy to itself.
+And DNS which is using service catalog.
+
+Munna Ahmad   25:39
+Mm hmm.
+
+Boyan Hristov   25:40
+This product.
+And it's which is the creating this DNS records test harness environment P3.
+Which I'm using here test harness Dev P3 atpco local.
+And we have same thing for for documentdb which is the mongodatabase we are using. We are currently using.
+So same thing or have.
+We used the secrets manager to put our secret there.
+We have.
+The networks we have the documentdb cluster.
+Cluster instances.
+Here it is.
+R6 ZG 2X large and all the the other attributes which after.
+Commit will trigger the pipeline.
+Goes.
+Here the pipelines.
+So the pipeline is first creating the EMI using Packer.
+Then it goes to.
+Provisioning.
+Of.
+Of the Terraform seats which is using the state.
+In.
+In GitHub, so we can't use that outside of GitLab.
+And the result if I go to.
+Amazon.
+Which I don't.
+Which I'm using only to to see what's going on there, but not to make any changes.
+Unless it's provisioned in.
+In another account so.
+That's probably in another account.
+It's not here.
+OK.
+This part is well documented.
+We have it in our conference page how to use all all these tools?
+
+Munna Ahmad   28:28
+Hello.
+
+Boyan Hristov   28:31
+Here is the test harness Koster so this.
+Thing here.
+This script is creating this cluster here.
+The test harness dev.
+
+Munna Ahmad   28:45
+Very good.
+
+Boyan Hristov   28:48
+And here it is test harness using the environment.
+So the same thing. Excuse me.
+
+Munna Ahmad   28:55
+No.
+
+Boyan Hristov   28:59
+Same thing is happening for the.
+Is it to instance?
+Here.
+Because if I go to.
+To the dev account.
+That's probably again in the in the npss, which is the shared account.
+
+Munna Ahmad   29:41
+OK.
+
+Boyan Hristov   29:41
+Across the environments.
+
+Munna Ahmad   29:56
+I feel it.
+
+Boyan Hristov   29:57
+Wanna test herns so I'll send.
+This harness.
+Dash environment.
+And here it is.
+Test harness dash environment.
+And.
+It should have the.
+The type of the instance, which is a variable which is defined in in the stages.
+So we need to have the same approach for our.
+SQL, Whatever it is.
+For provisioning here.
+
+Munna Ahmad   30:35
+Hmm.
+
+Boyan Hristov   30:35
+So any change to the instance should happen only.
+Only through telephone, because any manual change here will be automatically.
+Overridden by the Terraform or creation of resources outside the state will create huge mess for our account.
+So therefore, it's imperative to follow this this approach.
+But that's that's only the server itself and the database. We need to describe it as code here.
+Using SQL Alchemy or some other.
+Database is called approach.
+And the database the structure it will evolve.
+We'll start with something simple.
+For example, only only these three types of.
+Discrepancies.
+We currently have.
+The.
+Which I showed you here.
+The total price.
+YQYR and ttps. Each of them has a code and two.
+The codes of the two systems, FC and CQ.
+
+Munna Ahmad   32:08
+So these discrepancies we need to find from the database, right?
+
+Boyan Hristov   32:14
+No, they are coming alive from the system comparison from.
+
+Munna Ahmad   32:18
+Mm hmm.
+
+Boyan Hristov   32:20
+So the system is calling both APIs. That's happening in the old gibberish here.
+So it's going over scenarios.
+Like these ones?
+Or have some city pairs.
+And some parameters for them.
+I was going over these scenarios and it's performing queries to both systems because one of the systems is creative one it can.
+Find routes.
+Fares, flights, etc.
+The other one requires very specific input like third base is called Origin, Destination etcetera. So.
+So it's calling you the first system.
+It's getting results and for each of those results it's get. It's hitting the other system which can be found somewhere.
+Here.
+Mm hmm.
+Let me try to find it for you.
+So this is the authentication.
+This is the iterator.
+The runners.
+And.
+The comparison.
+Yes.
+Similar here.
+Not that it's important for the task.
+But I can find it.
+Yeah, probably in this results iterator.
+On the top we have these two calls, this one epsco.
+Yeah, it's part of the results iterator.
+It's calling the first system.
+It's getting the results.
+And it's applying some filters because we don't.
+The second system is not supporting.
+And it's doing a second call here to the to the other API. So if you wanna look how it.
+Actually, it's more interesting to to look how the response looks like.
+So here is the the response from the from the first system.
+This One South it's getting travelers.
+The Pharaohs.
+Baggage is not important taxes.
+And the price and this is the flight information. So it's making another call.
+Actually, it's a lot of flights here actually. And here is the calculation string.
+So it's starting doing.
+Calls for the second system, and once it finds matches.
+Down to to flight numbers and hours.
+And third basis code.
+It's getting the results.
+And it's starting comparison.
+So those two things.
+This should also match because this is the third basis code.
+So once it does that.
+Actually this.
+This one this system is.
+Has no security at all, so you can even.
+But you sure you should be able to to open it directly?
+No, it's not working like that.
+If I copy the URL.
+It's not coupling it directly.
+Anyway.
+You should trust. No, it's not copy test, it should.
+But here is the response.
+Oh, this. This is the request.
+What we are sending to the system, and this is the response here.
+So from this response it's starting comparison of those two responses.
+Once we have match once there is a match of the whites and fair level.
+
+Munna Ahmad   37:26
+But see, my question is my question is that the QC response and FC response having good difference in structures as well right?
+
+Boyan Hristov   37:26
+Insert.
+Right.
+
+Munna Ahmad   37:37
+Yeah. So in which basis we can find the comparison?
+
+Boyan Hristov   37:43
+It's done already.
+The comparison is already implemented and that's the result of it.
+
+Munna Ahmad   37:48
+OK.
+
+Boyan Hristov   37:51
+That's the result of the comparison.
+So you need to get this comparison and store it in SQL database. That's all.
+
+Munna Ahmad   37:53
+OK. OK. OK.
+I need to store this information into the SQL database, right?
+
+Boyan Hristov   38:04
+Right.
+
+Munna Ahmad   38:06
+Great. OK. So based on this, I'll have to design the database as well. I mean table as well.
+So where we can store the database data right?
+
+Boyan Hristov   38:17
+Right.
+
+Munna Ahmad   38:19
+So.
+Another question is that when do we need any UI sort of thing where we can ask to save into the database or we can while navigation of this application is stored into the database.
+So how we can when we can trigger the copy in part?
+
+Boyan Hristov   38:43
+So you don't need to store all this information because.
+You can store only this UID here.
+
+Munna Ahmad   38:52
+OK.
+
+Boyan Hristov   38:52
+And which can be used for for going back to the test harness and seeing all the details. The purpose of this is to get analytics results because.
+
+Munna Ahmad   39:00
+Mm hmm.
+
+Boyan Hristov   39:08
+Like.
+Here we have some that are not working very well because we we stopped supporting them. For example, this year to here.
+And we don't want to invest more into making them better.
+
+Munna Ahmad   39:32
+Mm hmm.
+
+Boyan Hristov   39:34
+And we prefer to completely get rid of this functionality here and put all the analytics part this entire part to be sourced by SQL database, which everybody can can work on.
+Instead of because it's working with these databases really hard. This application was designed to operate on a few months and just like any temporary solution, it stayed for years.
+S.
+And we repurpose it several times and we decided that we don't need, we don't want to invest more in it.
+
+Munna Ahmad   40:16
+Mm.
+
+Boyan Hristov   40:17
+We want to keep only the test harness parts which.
+Is calling both AP is basically the back end and this basic functionality of the front end.
+Here.
+And the rest of the functionality we want to we want it to go to.
+SQL database.
+Or some analytic system doesn't matter what it is.
+The the requirement was SQL.
+But we don't.
+It's not that important to be exactly SQL. Something that can be used for analytics.
+I wouldn't use.
+I I would consider some something different than SQL, but it's up to you to decide what to use.
+
+Munna Ahmad   41:19
+OK.
+That's fine.
+Let me analyze and let me think about how we can work, how we can proceed.
+So first of all, let me freeze the.
+Let me compile the requirements and will show share with you. And because it's a first meeting so maybe I didn't grasp all those things because maybe couple of things have bypassed offer over my head as well issues I have recorded.
+So I'll go through the recording sessions as well, and we'll try to find out the exact thing and we'll share with you.
+By to the end of the day, and then we'll set up, maybe tomorrow in order to.
+Finetize the things that how the things can be done.
+
+Boyan Hristov   42:05
+Yeah, sure. If you if you believe something is not.
+Some decisions you cannot make.
+Just let me know so I can spend time.
+
+Munna Ahmad   42:17
+Yeah. So it's like, see, this is the first meeting and I'm unaware with the system.
+
+Boyan Hristov   42:18
+And analyze.
+
+Munna Ahmad   42:25
+System is that so?
+Here I need to understand the system that where is that back and where the how the things can be integrated and so far I need some time. So let me so today's time let me compile all those things and we'll summarize that how the things so far what.
+I understood, so I'll share with you.
+And based on once, once and after that we'll sync up on 2nd in order to finalize.
+Because I think that how the things step by step process how the things can be done, at least we we can at least proceed.
+
+Boyan Hristov   42:58
+All right, let me know if you have any questions or suggestions.
+
+Munna Ahmad   43:02
+Sure.
+Sure, sure, sure.
+OK.
+
+Boyan Hristov   43:12
+OK.
+
+Munna Ahmad   43:13
+Thank you. Thanks.
+
+Boyan Hristov   43:13
+Thank you.
+
+Munna Ahmad   43:16
+Welcome. Thank you.
+
+Munna Ahmad stopped transcription

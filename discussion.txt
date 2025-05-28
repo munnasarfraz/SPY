@@ -1,3 +1,189 @@
+Here's a clean and professional **document format** template for your **Test Harness Enhancement: Understanding Document**. You can reuse or adapt this format for other technical documentation projects as well:
+
+---
+
+# **Test Harness Enhancement: Understanding Document**
+
+**Prepared by:** Munna Ahmad
+**Date:** \[Insert Date]
+**Version:** 1.0
+
+---
+
+## **1. Introduction**
+
+**Hi Boyan,**
+
+This document summarizes my understanding of the Test Harness system and the proposed changes based on our discussion. Please review and let me know if any corrections are needed.
+
+### **Key Objective:**
+
+Migrate discrepancy analytics from MongoDB to a relational database (SQL) while maintaining the existing comparison functionality of the Test Harness system.
+
+---
+
+## **2. Current System Understanding**
+
+### **2.1 Test Harness Overview**
+
+The Test Harness system:
+
+* Compares pricing results between two airline pricing systems:
+
+  * **Legacy Engine (Q)**
+  * **New System (FC)**
+* Generates discrepancy reports for:
+
+  * **Total Price**
+  * **YQYR** (carrier-imposed fees)
+  * **TTBS** (taxes)
+* Currently stores results in **MongoDB**
+
+### **2.2 Current Workflow**
+
+1. Test scenarios are executed
+2. System calls both APIs (Q and FC) in parallel
+3. Compares responses at multiple levels:
+
+   * Flight segments
+   * Fares
+   * Pricing calculations
+4. Stores comparison results in MongoDB
+5. Displays basic discrepancy information through Django UI
+
+❓ **Verification Needed:**
+
+* Is this an accurate representation of the current workflow?
+* Are there any additional comparison steps I should be aware of?
+
+---
+
+## **3. Proposed Changes**
+
+### **3.1 SQL Database Implementation**
+
+**Purpose:** Enable better analytics capabilities by storing discrepancy data in a relational format.
+
+**Key Requirements:**
+
+* Maintain existing MongoDB storage (for backward compatibility)
+* Add parallel storage to SQL database
+* Design simple schema focused on discrepancy analysis
+
+### **3.2 Proposed Database Schema**
+
+**Table: discrepancies**
+
+| Field              | Type     | Description                                  |
+| ------------------ | -------- | -------------------------------------------- |
+| id                 | UUID     | Unique identifier for each discrepancy       |
+| scenario\_id       | String   | Reference to test scenario                   |
+| discrepancy\_type  | String   | Type of discrepancy (TotalPrice, YQYR, TTBS) |
+| engine\_value      | Decimal  | Value from Engine (Q)                        |
+| new\_system\_value | Decimal  | Value from new system (FC)                   |
+| difference         | Decimal  | Absolute difference between values           |
+| timestamp          | DateTime | When comparison was performed                |
+| metadata           | JSON     | Additional context (optional)                |
+
+❓ **Questions:**
+
+1. Does this schema cover all necessary fields for analysis?
+2. Should we include additional metadata about the test scenarios?
+
+---
+
+## **4. Implementation Approach**
+
+### **4.1 Code Changes Overview**
+
+Target file: `compare.py`
+
+1. Identify where comparison results are currently processed
+2. Add functionality to:
+
+   * Transform discrepancy data into relational format
+   * Insert into SQL database
+3. Ensure error handling maintains system stability
+
+### **4.2 Infrastructure Changes**
+
+1. **Database Provisioning**
+
+   * Use Terraform to create RDS instance
+   * Configure Aurora Serverless for cost efficiency
+
+2. **Security**
+
+   * Set up proper VPC networking
+   * Manage credentials through Secrets Manager
+
+❓ **Questions:**
+
+* Should we create a new Terraform module or modify an existing one?
+* What are the security requirements for database access?
+
+---
+
+## **5. Next Steps**
+
+1. **Review & Confirmation**
+
+   * Verify understanding of current system
+   * Finalize database schema
+
+2. **Development**
+
+   * Terraform configuration for RDS
+   * Code changes for SQL insertion
+
+3. **Testing**
+
+   * Validate in development environment
+   * Performance testing
+
+4. **Deployment**
+
+   * Staged rollout to production
+
+**Your Input Needed On:**
+
+* Priority of implementation phases
+* Any potential risks or challenges to anticipate
+
+---
+
+## **6. Open Questions**
+
+| Question                            | Owner | Status  |
+| ----------------------------------- | ----- | ------- |
+| Should we backfill historical data? | Boyan | Pending |
+| Data retention period requirements? | Team  | Pending |
+| Monitoring requirements for new DB? | Munna | Draft   |
+
+---
+
+## **Approval Requested**
+
+* [ ] Boyan Hristov
+* [ ] \[Other Stakeholders as needed]
+
+---
+
+**Please let me know if any aspects need clarification or adjustment.**
+
+---
+
+Let me know if you'd like this turned into a downloadable Word or PDF file, or formatted for a tool like Confluence or Notion.
+
+
+
+
+
+
+
+
+
+
 Transcript
 May 28, 2025, 10:01AM
 
